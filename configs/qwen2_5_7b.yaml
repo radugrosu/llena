@@ -1,0 +1,62 @@
+# configs/qwen2_5_7b.yaml
+project:
+  name: llena
+  run_name: "qwen2.5-7b_siglip_mlp2_smoke"
+
+paths:
+  artifacts_dir: "artifacts"
+  reports_dir: "reports"
+  cache_dir: "${HF_HOME:-.cache/huggingface}"
+
+model:
+  llm_name: "Qwen/Qwen2.5-7B-Instruct"
+  vision_name: "google/siglip-base-patch16-224"
+  llm_revision: null
+  vision_revision: null
+
+mm:
+  num_image_tokens: 256
+  projector: "mlp2"
+  perceiver_latents: 64
+  perceiver_layers: 2
+
+train:
+  seed: 42
+  device: "auto"
+  precision: "bf16"
+  gradient_checkpointing: true
+
+  use_lora: true
+  use_qlora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+  lr_lora: 8.0e-5
+  lr_projector: 2.0e-4
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+
+  max_seq_len: 2048
+  micro_batch_size: 1
+  grad_accum_steps: 16
+
+  log_every: 10
+  eval_every: 0
+  save_every: 100
+  save_total_limit: 2
+
+data:
+  dataset: "synthetic"
+  num_samples: 64
+  image_size: 224
+
+eval:
+  enabled: true
+  max_samples: 32
+
+logging:
+  backend: "wandb"
+  wandb_project: null

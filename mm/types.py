@@ -1,0 +1,34 @@
+from typing import Protocol, TypedDict, TypeAlias, Literal
+from PIL import Image
+
+
+class VQASample(TypedDict):
+    image: Image.Image
+    question: str
+    answer: str
+
+
+Role: TypeAlias = Literal["user", "assistant", "system"]
+ChatMessage: TypeAlias = dict[str, str]  # {"role": "...", "content": "..."}
+ChatConversation: TypeAlias = list[ChatMessage]
+
+
+class ChatTokenizer(Protocol):
+    """
+    Specific to Qwen2.5 Instruct tokenizer usage:
+    - must support apply_chat_template(tokenize=True)
+    """
+
+    pad_token_id: int | None
+    eos_token_id: int | None
+    pad_token: str | None
+    eos_token: str | None
+
+    def apply_chat_template(
+        self,
+        conversation: ChatConversation,
+        *,
+        add_generation_prompt: bool,
+        tokenize: bool,
+        return_tensors: None = None,
+    ) -> list[int]: ...

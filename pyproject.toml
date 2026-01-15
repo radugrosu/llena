@@ -1,0 +1,38 @@
+[project]
+name = "llena"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.13.*"
+dependencies = [
+  "accelerate>=1.12.0",
+  "bitsandbytes>=0.49.1",
+  "datasets>=4.4.2",
+  "evaluate>=0.4.6",
+  "gradio>=6.3.0",
+  "numpy>=2.4.1",
+  "peft>=0.18.1",
+  "pillow>=12.1.0",
+  "pyyaml>=5.3.1",
+  "rich>=14.2.0",
+  "safetensors>=0.7.0",
+  "torch>=2.9.1",
+  "torchvision>=0.2.0",
+  "tqdm>=4.67.1",
+  "transformers>=4.57.5",
+  "typer>=0.21.1",
+  "wandb>=0.23.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[dependency-groups]
+dev = ["ipython>=9.9.0", "pytest>=9.0.2"]
