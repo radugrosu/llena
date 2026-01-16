@@ -1,7 +1,7 @@
-# configs/qwen2_5_7b.yaml
+# configs/local/docvqa_train.yaml
 project:
   name: llena
-  run_name: "qwen2.5-7b_siglip_mlp2_smoke"
+  run_name: "local_docvqa_train_0.5b"
 
 paths:
   artifacts_dir: "artifacts"
@@ -9,7 +9,7 @@ paths:
   cache_dir: "${HF_HOME:-.cache/huggingface}"
 
 model:
-  llm_name: "Qwen/Qwen2.5-7B-Instruct"
+  llm_name: "Qwen/Qwen2.5-0.5B-Instruct"
   vision_name: "google/siglip-base-patch16-224"
   llm_revision: null
   vision_revision: null
@@ -22,44 +22,44 @@ mm:
 
 train:
   seed: 42
-  device: "auto"
+  device: "cpu"
   precision: "bf16"
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 
   use_lora: true
-  use_qlora: true
+  use_qlora: false
   lora_r: 16
   lora_alpha: 32
   lora_dropout: 0.05
   lora_targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
 
-  lr_lora: 8.0e-5
+  lr_lora: 1.0e-4
   lr_projector: 2.0e-4
   weight_decay: 0.0
   warmup_ratio: 0.03
   max_grad_norm: 1.0
 
-  max_seq_len: 2048
-  batch_size: 16
+  max_seq_len: 512
+  batch_size: 2
   micro_batch_size: 1
 
   log_every: 10
   eval_every: 0
-  save_every: 100
+  save_every: 50
   save_total_limit: 2
 
 data:
-  dataset: "synthetic"
+  dataset: "docvqa"
   data_dir: "datasets/processed"
   split: "train"
-  num_samples: 64
+  num_samples: 500
   image_size: 224
 
 eval:
-  enabled: true
-  max_samples: 32
+  enabled: false
+  max_samples: 0
   batch_size: 1
 
 logging:
-  backend: "wandb"
+  backend: "none"
   wandb_project: null

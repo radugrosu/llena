@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoImageProcessor, AutoTokenizer
+from transformers import AutoTokenizer, SiglipImageProcessor
 
 from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator
@@ -10,7 +10,7 @@ def test_collator_masks_prompt_and_mm_prefix() -> None:
     vision_name = "google/siglip-base-patch16-224"
 
     tok = AutoTokenizer.from_pretrained(llm_name, trust_remote_code=True)
-    proc = AutoImageProcessor.from_pretrained(vision_name)
+    proc = SiglipImageProcessor.from_pretrained(vision_name)
 
     ds = SyntheticVQADataset(num_samples=4, image_size=224, seed=123)
     batch = [ds[i] for i in range(2)]

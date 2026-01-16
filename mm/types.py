@@ -1,4 +1,4 @@
-from typing import Protocol, TypedDict, TypeAlias, Literal
+from typing import Protocol, TypedDict, TypeAlias, Literal, NotRequired
 from PIL import Image
 
 
@@ -6,6 +6,7 @@ class VQASample(TypedDict):
     image: Image.Image
     question: str
     answer: str
+    answers: NotRequired[list[str]]
 
 
 Role: TypeAlias = Literal["user", "assistant", "system"]
@@ -32,3 +33,5 @@ class ChatTokenizer(Protocol):
         tokenize: bool,
         return_tensors: None = None,
     ) -> list[int]: ...
+
+    def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> str: ...

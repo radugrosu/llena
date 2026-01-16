@@ -2,18 +2,24 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import time
 
 import torch
 import typer
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from transformers import SiglipImageProcessor
 from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
+import wandb
+
+from scripts.utils import get_git_commit
 
 from mm.config import load_config, save_resolved_config
 from mm.model import LlenaModel, LlenaModelConfig
 from mm.collator import LlenaCollator
 from mm.run_config import RunConfig, Stage
 from data.synthetic import SyntheticVQADataset
+from data.format import load_vqa_jsonl_dataset
 
 
 def opt(default: object, help: str):
@@ -39,6 +45,22 @@ def get_device(device: str, *, force_cuda: bool) -> torch.device:
     if d == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     raise ValueError(f"device must be auto|cpu|cuda, got: {device}")
+
+
+def build_dataset(rc: RunConfig) -> Dataset:
+    if rc.data.dataset == "synthetic":
+        return SyntheticVQADataset(
+            num_samples=rc.data.num_samples,
+            image_size=rc.data.image_size,
+            seed=rc.train.seed,
+        )
+    max_samples = rc.data.num_samples if rc.data.num_samples > 0 else None
+    return load_vqa_jsonl_dataset(
+        dataset=rc.data.dataset,
+        data_dir=Path(rc.data.data_dir),
+        split=rc.data.split,
+        max_samples=max_samples,
+    )
 
 
 def trainable_param_summary(
@@ -120,9 +142,7 @@ def load_ckpt(
 
     if "adapter" in ckpt:
         if not model.cfg.peft_enable or not isinstance(model.llm, PeftModel):
-            raise RuntimeError(
-                "Checkpoint has adapter weights but current model is not PEFT-wrapped."
-            )
+            raise RuntimeError("Checkpoint has adapter weights but current model is not PEFT-wrapped.")
         set_peft_model_state_dict(model.llm, ckpt["adapter"])
 
     if "optimizer" in ckpt:
@@ -136,17 +156,12 @@ def main(
     stage: Stage = opt("smoke", "Stage: smoke | projector | peft_lora | peft_qlora"),
     max_steps: int = opt(200, "Max training steps"),
     out_dir: str = opt("artifacts/ckpt_run", "Output directory for checkpoints/config"),
-    resume: str | None = opt(
-        None, "Path to a ckpt.pt or a step_* directory to resume from"
-    ),
-    save_every: int | None = opt(
-        None, "Override train.save_every (int). If None, use config."
-    ),
-    save_trainable_only: bool = opt(
-        True, "If true, saves only projector/adapters for PEFT stages."
-    ),
+    resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
+    save_every: int | None = opt(None, "Override train.save_every (int). If None, use config."),
+    save_trainable_only: bool = opt(True, "If true, saves only projector/adapters for PEFT stages."),
     override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
 ) -> None:
+    commit = get_git_commit()
     if stage not in {"smoke", "projector", "peft_lora", "peft_qlora"}:
         raise ValueError(f"Unknown stage: {stage}")
 
@@ -162,7 +177,7 @@ def main(
     save_resolved_config(raw_cfg, out_path / "resolved_config.yaml")
     set_seed(rc.train.seed)
 
-    freeze_llm = stage == "projector"
+    freeze_llm = stage in {"smoke", "projector"}
     peft_enable = stage in {"peft_lora", "peft_qlora"}
 
     mcfg = LlenaModelConfig(
@@ -183,27 +198,20 @@ def main(
     )
 
     model = LlenaModel(mcfg)
-    if not qlora_enable:
-        model = model.to(device)
 
-    if stage == "projector":
+    if stage in {"smoke", "projector"}:
         for name, p in model.named_parameters():
             p.requires_grad = name.startswith("projector.")
 
     s = trainable_param_summary(model)
     typer.echo(
-        f"params: total={s['total']:,} trainable={s['trainable']:,} "
-        f"({float(s['pct']):.6f}%) prefixes={s['prefixes']}"  # pyright: ignore[reportArgumentType]
+        f"params: total={s['total']:,} trainable={s['trainable']:,} ({float(s['pct']):.6f}%) prefixes={s['prefixes']}"  # pyright: ignore[reportArgumentType]
     )
     typer.echo(f"effective_batch_size={rc.effective_batch_size()}")
 
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
 
-    ds = SyntheticVQADataset(
-        num_samples=rc.data.num_samples,
-        image_size=rc.data.image_size,
-        seed=rc.train.seed,
-    )
+    ds = build_dataset(rc)
 
     collator = LlenaCollator(
         tokenizer=model.tokenizer,
@@ -237,6 +245,11 @@ def main(
     save_every_eff = save_every if save_every is not None else rc.train.save_every
     max_grad_norm = rc.train.max_grad_norm
 
+    if rc.logging.backend == "wandb":
+        wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
+    elif rc.logging.backend == "mlflow":
+        raise NotImplementedError("mlflow logging not implemented.")
+
     start_step = 0
     if resume is not None:
         ckpt_path = Path(resume)
@@ -245,14 +258,13 @@ def main(
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
         start_step, ckpt_stage = load_ckpt(ckpt_path, model, optm, device)
-        typer.echo(
-            f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})"
-        )
+        typer.echo(f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})")
 
     model.train()
     optm.zero_grad(set_to_none=True)
 
     step = start_step
+    last_loss = 0.0
     for batch in dl:
         step += 1
         batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
@@ -274,7 +286,10 @@ def main(
             optm.zero_grad(set_to_none=True)
 
         if step % log_every == 0:
-            typer.echo(f"stage={stage} step={step} loss={(loss.item() * accum):.4f}")
+            last_loss = float(loss.item() * accum)
+            typer.echo(f"stage={stage} step={step} loss={last_loss:.4f}")
+            if rc.logging.backend == "wandb":
+                wandb.log({"train/loss": last_loss, "step": step})
 
         if save_every_eff > 0 and step % save_every_eff == 0:
             save_ckpt(
@@ -298,6 +313,22 @@ def main(
         save_trainable_only=save_trainable_only,
     )
     typer.echo("done")
+
+    report = {
+        "stage": stage,
+        "step": step,
+        "loss": last_loss,
+        "ckpt_dir": str(out_path / f"step_{step}"),
+        "commit": commit,
+    }
+    report_path = Path(rc.paths.reports_dir) / f"train_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with report_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    if rc.logging.backend == "wandb":
+        wandb.finish()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+# Auto-approve safe read-only commands (built-in to "untrusted", but reinforce if needed)
+prefix_rule(
+    pattern = ["ls", "cat", "grep", "rg", "sed", "find", "pwd", "echo", "head", "tail", "less", "wc"],
+    decision = "allow",
+    justification = "Safe read-only commands"
+)
+
+# Auto-approve common dev tools
+prefix_rule(
+    pattern = ["git", "npm", "pip", "pytest", "pyright", "ty", "mypy"],
+    decision = "allow",
+    justification = "Standard development tools"
+)
+
+# Require approval for destructive commands
+prefix_rule(
+    pattern = ["rm", "dd", "mkfs", "fdisk", "shutdown"],
+    decision = "prompt",
+    justification = "Destructive commands need confirmation"
+)

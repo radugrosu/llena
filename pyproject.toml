@@ -25,14 +25,23 @@ dependencies = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }
 
 [dependency-groups]
-dev = ["ipython>=9.9.0", "pytest>=9.0.2"]
+dev = ["ipython>=9.9.0", "pyright>=1.1.408", "pytest>=9.0.2"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+"**/scripts/*.py" = ["E501"]
+
+[tool.pyright]
+reportConstantRedefinition = false

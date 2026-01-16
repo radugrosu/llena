@@ -2,7 +2,7 @@ from pathlib import Path
 import re
 
 import os
-from typing import Any, Iterable
+from typing import Iterable, cast
 import yaml
 
 
@@ -24,9 +24,23 @@ def _expand_env_vars(value: str) -> str:
     return _ENV_PATTERN.sub(repl, value)
 
 
-def _walk_and_expand(obj: Any) -> Any:
+def _assert_str_dict(obj: object) -> dict[str, object]:
+    if not isinstance(obj, dict):
+        raise TypeError(f"Expected dict, got {type(obj).__name__}")
+    for k in obj.keys():
+        if not isinstance(k, str):
+            raise TypeError(f"Config keys must be str, got {type(k).__name__}")
+    return cast(dict[str, object], obj)
+
+
+def _walk_and_expand(obj: object) -> object:
     if isinstance(obj, dict):
-        return {k: _walk_and_expand(v) for k, v in obj.items()}
+        out: dict[str, object] = {}
+        for k, v in obj.items():
+            if not isinstance(k, str):
+                raise TypeError(f"Config keys must be str, got {type(k).__name__}")
+            out[k] = _walk_and_expand(v)
+        return out
     if isinstance(obj, list):
         return [_walk_and_expand(v) for v in obj]
     if isinstance(obj, str):
@@ -34,20 +48,22 @@ def _walk_and_expand(obj: Any) -> Any:
     return obj
 
 
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+def _deep_merge(
+    base: dict[str, object], override: dict[str, object]
+) -> dict[str, object]:
     """
     Merge override into base (recursively), returning a new dict.
     """
     out = dict(base)
     for k, v in override.items():
         if k in out and isinstance(out[k], dict) and isinstance(v, dict):
-            out[k] = _deep_merge(out[k], v)
+            out[k] = _deep_merge(_assert_str_dict(out[k]), _assert_str_dict(v))
         else:
             out[k] = v
     return out
 
 
-def _set_dotted_key(cfg: dict[str, Any], dotted_key: str, raw_value: str) -> None:
+def _set_dotted_key(cfg: dict[str, object], dotted_key: str, raw_value: str) -> None:
     """
     Set nested keys like "train.lr_lora=1e-4" into cfg.
 
@@ -60,7 +76,7 @@ def _set_dotted_key(cfg: dict[str, Any], dotted_key: str, raw_value: str) -> Non
     """
     # Try to parse as YAML scalar/structure first (handles numbers, bools, lists, dicts)
     try:
-        value = yaml.safe_load(raw_value)
+        value: object = yaml.safe_load(raw_value)
     except Exception:
         value = raw_value
 
@@ -69,14 +85,14 @@ def _set_dotted_key(cfg: dict[str, Any], dotted_key: str, raw_value: str) -> Non
     for k in keys[:-1]:
         if k not in cur or not isinstance(cur[k], dict):
             cur[k] = {}
-        cur = cur[k]
+        cur = _assert_str_dict(cur[k])
     cur[keys[-1]] = value
 
 
 def load_config(
     config_path: str | Path,
     overrides: Iterable[str] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """
     Load YAML config, optionally support a base config via top-level key:
       base_config: "configs/base.yaml"
@@ -86,17 +102,21 @@ def load_config(
     """
     config_path = Path(config_path)
     with config_path.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+        raw = yaml.safe_load(f) or {}
+        cfg = _assert_str_dict(raw)
 
     # Optional base config chaining
     base_ref = cfg.pop("base_config", None)
     if base_ref:
+        if not isinstance(base_ref, str):
+            raise TypeError("base_config must be a string path.")
         base_path = (config_path.parent / base_ref).resolve()
         base_cfg = load_config(base_path)  # recursive; base can also have base_config
         cfg = _deep_merge(base_cfg, cfg)
 
     # Expand env vars like ${HF_HOME:-...}
-    cfg = _walk_and_expand(cfg)
+    cfg_obj = _walk_and_expand(cfg)
+    cfg = _assert_str_dict(cfg_obj)
 
     # Apply overrides
     if overrides:
@@ -115,13 +135,16 @@ def load_config(
         ("data", "dataset"),
     ]
     for a, b in required:
-        if a not in cfg or not isinstance(cfg[a], dict) or b not in cfg[a]:
+        section = cfg.get(a)
+        if not isinstance(section, dict):
+            raise KeyError(f"Missing required config key: {a}.{b}")
+        if b not in section:
             raise KeyError(f"Missing required config key: {a}.{b}")
 
     return cfg
 
 
-def save_resolved_config(cfg: dict[str, Any], out_path: str | Path) -> None:
+def save_resolved_config(cfg: dict[str, object], out_path: str | Path) -> None:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:

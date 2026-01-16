@@ -1,7 +1,7 @@
 # configs/qwen2_5_3b.yaml
 project:
   name: llena
-  run_name: "qwen2.5-1.5b_siglip_mlp2_smoke"
+  run_name: "qwen2.5-0.5b_siglip_mlp2_smoke"
 
 paths:
   artifacts_dir: "artifacts"
@@ -9,7 +9,7 @@ paths:
   cache_dir: "${HF_HOME:-.cache/huggingface}"
 
 model:
-  llm_name: "Qwen/Qwen2.5-1.5B-Instruct"
+  llm_name: "Qwen/Qwen2.5-0.5B-Instruct"
   vision_name: "google/siglip-base-patch16-224"
 
   # Optional: HF revision pins for reproducibility
@@ -50,8 +50,8 @@ train:
 
   # Sequence & batching
   max_seq_len: 1024
+  batch_size: 4
   micro_batch_size: 1
-  grad_accum_steps: 4
 
   # Logging/checkpointing
   log_every: 10
@@ -62,13 +62,16 @@ train:
 data:
   # For stage-0 smoke, use a tiny synthetic dataset
   dataset: "synthetic"
+  data_dir: "datasets/processed"
+  split: "train"
   num_samples: 64
   image_size: 224
 
 eval:
   enabled: true
   max_samples: 32
+  batch_size: 2
 
 logging:
-  backend: "wandb" # "none" | "wandb" | "mlflow"
+  backend: "wandb" # "none" | "wandb"
   wandb_project: null

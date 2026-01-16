@@ -20,6 +20,7 @@ def _encode_chat_sft(
     tokenizer: ChatTokenizer,
     question: str,
     answer: str,
+    max_len: int,
 ) -> tuple[list[int], list[int]]:
     """
     Qwen2.5-Instruct path only:
@@ -43,16 +44,10 @@ def _encode_chat_sft(
         return_tensors=None,
     )
 
-    prompt_len = len(prompt_ids)
-    labels = [-100] * prompt_len + full_ids[prompt_len:]
-    return full_ids, labels
-
-
-def _truncate(
-    full_ids: list[int], labels: list[int], max_len: int
-) -> tuple[list[int], list[int]]:
     if max_len <= 0:
         raise ValueError("max_len must be > 0")
+    prompt_len = len(prompt_ids)
+    labels = [-100] * prompt_len + full_ids[prompt_len:]
     if len(full_ids) <= max_len:
         return full_ids, labels
     return full_ids[:max_len], labels[:max_len]
@@ -63,6 +58,8 @@ def _pad_batch_1d(
     pad_value: int,
     pad_to_multiple_of: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if any(len(s) == 0 for s in sequences):
+        raise ValueError("Encountered empty sequence in batch.")
     max_len = max((len(s) for s in sequences), default=0)
     if (
         pad_to_multiple_of is not None
@@ -76,8 +73,6 @@ def _pad_batch_1d(
 
     for i, seq in enumerate(sequences):
         t = len(seq)
-        if t == 0:
-            continue
         batch[i, :t] = torch.tensor(seq, dtype=torch.long)
         attn[i, :t] = 1
 
@@ -127,9 +122,11 @@ class LlenaCollator:
 
         for ex in batch:
             full_ids, labels = _encode_chat_sft(
-                self.tokenizer, ex["question"], ex["answer"]
+                self.tokenizer,
+                ex["question"],
+                ex["answer"],
+                self.max_seq_len,
             )
-            full_ids, labels = _truncate(full_ids, labels, self.max_seq_len)
             input_id_seqs.append(full_ids)
             label_seqs.append(labels)
 

@@ -1,0 +1,7 @@
+# Set your base approval mode
+approval_policy = "untrusted"    # Auto-allows safe read-only; prompts for others (e.g., destructive)
+sandbox_mode = "workspace-write" # Allows writes in workspace, restricts elsewhere
+
+# Optional: Customize sandbox further
+[sandbox_workspace_write]
+network_access = false # Block network for extra safety; set to true if needed

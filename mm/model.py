@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from torch import nn
@@ -69,10 +69,7 @@ class LlenaModel(nn.Module):
         if cfg.peft_target_modules is None:
             cfg.peft_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
-        tok = AutoTokenizer.from_pretrained(cfg.llm_name)
-        self.tokenizer = tok  # Protocol-typed in our codebase
-
-        # Vision always fp32 is fine; we cast at the projector boundary
+        self.tokenizer = AutoTokenizer.from_pretrained(cfg.llm_name)
         self.vision = SiglipVisionModel.from_pretrained(cfg.vision_name)
 
         if cfg.qlora_enable:
@@ -103,6 +100,7 @@ class LlenaModel(nn.Module):
             llm = Qwen2ForCausalLM.from_pretrained(cfg.llm_name, dtype=llm_dtype)
             if cfg.gradient_checkpointing:
                 llm.gradient_checkpointing_enable()
+                llm.config.use_cache = False
             self.llm = llm
 
         if cfg.peft_enable:
@@ -150,6 +148,16 @@ class LlenaModel(nn.Module):
         embed_dtype = self.llm.get_input_embeddings().weight.dtype  # pyright: ignore[reportCallIssue]
         self.projector.to(dtype=embed_dtype)  # pyright: ignore[reportCallIssue, reportArgumentType]
 
+        target_device = torch.device("cuda" if cfg.device == "cuda" else "cpu")
+        if cfg.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("device='cuda' requested but CUDA is not available.")
+
+        if cfg.qlora_enable:
+            cast(nn.Module, self.vision).to(target_device)
+            self.projector = self.projector.to(target_device)
+        else:
+            self.to(target_device)
+
     def forward(
         self,
         *,
@@ -164,20 +172,13 @@ class LlenaModel(nn.Module):
             v_tokens = v_tokens.detach()
 
         v_tokens = _select_or_pad_tokens(v_tokens, self.num_image_tokens)
-
-        # Always cast vision tokens to projector dtype (derived from weights, no caching)
         proj_dtype = next(self.projector.parameters()).dtype
         v_tokens = v_tokens.to(dtype=proj_dtype)
-
         img_embeds = self.projector(v_tokens)
 
-        # Text embeds dtype is whatever the LLM embedding weights are
         text_embeds = self.llm.get_input_embeddings()(input_ids)  # pyright: ignore[reportCallIssue]
-
-        # Safety: ensure both are identical dtype for concat + downstream linears
         if img_embeds.dtype != text_embeds.dtype:
             img_embeds = img_embeds.to(dtype=text_embeds.dtype)
-
         inputs_embeds = torch.cat([img_embeds, text_embeds], dim=1)
 
         out = self.llm(
