@@ -84,6 +84,7 @@ def load_eval_ckpt(path: str, model: LlenaModel, device: torch.device) -> None:
                 "Checkpoint has adapter weights but current model is not PEFT-wrapped."
             )
         set_peft_model_state_dict(model.llm, ckpt["adapter"])
+    typer.echo(f"ckpt: loaded {_ckpt_path(path)}")
 
 
 _PUNCT = re.compile(r"[^0-9a-zA-Z]+")
@@ -205,41 +206,11 @@ def eval_loop(
     }
 
 
-def main(
-    config: str = opt(..., "Path to YAML config"),
-    stage: Stage = opt("smoke", "Stage: smoke | projector | peft_lora | peft_qlora"),
-    ckpt: str | None = opt(None, "Path to a ckpt.pt or a step_* directory"),
-    batch_size: int | None = opt(None, "Eval batch size (None = config)"),
-    max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
-    override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
-    log_every: int = opt(100, "Log progress every N batches (0 disables)"),
-) -> None:
-    typer.echo("eval: starting", err=True)
-    metrics, dataset = run_eval(
-        config=config,
-        stage=stage,
-        ckpt=ckpt,
-        batch_size=batch_size,
-        max_samples=max_samples,
-        override=override,
-        log_every=log_every,
-    )
-    msg = f"eval: count={int(metrics['count'])} avg_loss={metrics['avg_loss']:.4f}"
-    if dataset == "textvqa":
-        msg += f" vqa_acc={metrics['vqa_accuracy']:.4f}"
-    elif dataset == "docvqa":
-        msg += f" anls={metrics['anls']:.4f}"
-    else:
-        msg += f" exact_match={metrics['exact_match']:.4f}"
-    typer.echo(msg)
-    typer.echo("eval: done", err=True)
-
-
 def run_eval(
     *,
     config: str,
     stage: Stage,
-    ckpt: str | None,
+    ckpt: str,
     batch_size: int | None,
     max_samples: int | None,
     override: list[str],
@@ -271,8 +242,7 @@ def run_eval(
 
     model = LlenaModel(mcfg)
 
-    if ckpt is not None:
-        load_eval_ckpt(ckpt, model, device)
+    load_eval_ckpt(ckpt, model, device)
 
     if rc.logging.backend == "wandb":
         wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
@@ -335,6 +305,36 @@ def run_eval(
         wandb.finish()
 
     return metrics, rc.data.dataset
+
+
+def main(
+    config: str = opt(..., "Path to YAML config"),
+    stage: Stage = opt("smoke", "Stage: smoke | projector | peft_lora | peft_qlora"),
+    ckpt: str = opt(..., "Path to a ckpt.pt or a step_* directory"),
+    batch_size: int | None = opt(None, "Eval batch size (None = config)"),
+    max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
+    override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
+    log_every: int = opt(100, "Log progress every N batches (0 disables)"),
+) -> None:
+    typer.echo("eval: starting", err=True)
+    metrics, dataset = run_eval(
+        config=config,
+        stage=stage,
+        ckpt=ckpt,
+        batch_size=batch_size,
+        max_samples=max_samples,
+        override=override,
+        log_every=log_every,
+    )
+    msg = f"eval: count={int(metrics['count'])} avg_loss={metrics['avg_loss']:.4f}"
+    if dataset == "textvqa":
+        msg += f" vqa_acc={metrics['vqa_accuracy']:.4f}"
+    elif dataset == "docvqa":
+        msg += f" anls={metrics['anls']:.4f}"
+    else:
+        msg += f" exact_match={metrics['exact_match']:.4f}"
+    typer.echo(msg)
+    typer.echo("eval: done", err=True)
 
 
 if __name__ == "__main__":

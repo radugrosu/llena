@@ -54,6 +54,14 @@ def build_dataset(rc: RunConfig) -> Dataset:
             image_size=rc.data.image_size,
             seed=rc.train.seed,
         )
+    if rc.data.dataset == "sharegpt4v_coco":
+        max_samples = rc.data.num_samples if rc.data.num_samples > 0 else None
+        return load_vqa_jsonl_dataset(
+            dataset=rc.data.dataset,
+            data_dir=Path(rc.data.data_dir),
+            split=rc.data.split,
+            max_samples=max_samples,
+        )
     max_samples = rc.data.num_samples if rc.data.num_samples > 0 else None
     return load_vqa_jsonl_dataset(
         dataset=rc.data.dataset,
@@ -122,6 +130,7 @@ def save_ckpt(
         payload["model"] = model.state_dict()
 
     torch.save(payload, save_path / "ckpt.pt")
+    typer.echo(f"ckpt: saved {save_path / 'ckpt.pt'}")
 
 
 def load_ckpt(
@@ -148,6 +157,7 @@ def load_ckpt(
     if "optimizer" in ckpt:
         optm.load_state_dict(ckpt["optimizer"])
 
+    typer.echo(f"ckpt: loaded {ckpt_path}")
     return step, stage
 
 

@@ -32,9 +32,7 @@ def _parse_record(obj: object) -> VQARecord:
     answers_obj = obj.get("answers")
     answers: list[str] | None = None
     if answers_obj is not None:
-        if not isinstance(answers_obj, list) or not all(
-            isinstance(x, str) for x in answers_obj
-        ):
+        if not isinstance(answers_obj, list) or not all(isinstance(x, str) for x in answers_obj):
             raise TypeError("Record 'answers' must be list[str] when provided.")
         answers = answers_obj
     if answer is None and answers:
@@ -42,9 +40,7 @@ def _parse_record(obj: object) -> VQARecord:
     if not isinstance(question, str) or not isinstance(answer, str):
         raise TypeError("Record must include 'question' and 'answer' as str.")
 
-    return VQARecord(
-        image_path=image_val, question=question, answer=answer, answers=answers
-    )
+    return VQARecord(image_path=image_val, question=question, answer=answer, answers=answers)
 
 
 def _load_jsonl(path: Path) -> list[VQARecord]:
@@ -59,9 +55,7 @@ def _load_jsonl(path: Path) -> list[VQARecord]:
     return records
 
 
-def resolve_dataset_paths(
-    data_dir: Path, dataset: str, split: str
-) -> tuple[Path, Path]:
+def resolve_dataset_paths(data_dir: Path, dataset: str, split: str) -> tuple[Path, Path]:
     annotations = data_dir / dataset / f"{split}.jsonl"
     image_root = data_dir / dataset / "images"
     return annotations, image_root

@@ -6,7 +6,7 @@ from typing import Literal, cast
 
 
 Stage = Literal["smoke", "projector", "peft_lora", "peft_qlora"]
-DatasetName = Literal["synthetic", "docvqa", "textvqa"]
+DatasetName = Literal["synthetic", "docvqa", "textvqa", "sharegpt4v_coco"]
 LogBackend = Literal["none", "wandb", "mlflow"]
 
 
@@ -129,8 +129,11 @@ class RunConfig:
         # --- Data ---
         data_d = d["data"]
         dataset = str(data_d["dataset"]).lower()
-        if dataset not in {"synthetic", "docvqa", "textvqa"}:
-            raise ValueError(f"data.dataset must be one of synthetic|docvqa|textvqa, got: {data_d['dataset']}")
+        if dataset not in {"synthetic", "docvqa", "textvqa", "sharegpt4v_coco"}:
+            raise ValueError(
+                "data.dataset must be one of synthetic|docvqa|textvqa|sharegpt4v_coco, "
+                f"got: {data_d['dataset']}"
+            )
         data_dir = str(data_d.get("data_dir", "datasets/processed"))
         split = str(data_d.get("split", "train"))
         data = DataConfig(
