@@ -12,3 +12,5 @@ reports
 artifacts
 datasets/processed
 datasets/raw
+.env
+wandb

@@ -37,15 +37,22 @@ def download_image(url: str, save_path: Path, timeout: float) -> bool:
 
 
 def main(
-    out_dir: str = opt("datasets/raw/sharegpt4v_coco", "Output directory"),
+    out_dir: str = opt("datasets/raw/llava_instruct", "Output directory"),
     coco_dir: str = opt("datasets/raw/coco2017", "Shared COCO root (images/)"),
     metadata_url: str = opt(
-        "https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json",
-        "ShareGPT4V metadata JSON URL",
+        "https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/resolve/main/llava_instruct_150k.json",
+        "LLaVA-Instruct-150K metadata JSON URL",
     ),
     max_workers: int = opt(16, "Number of download workers"),
     timeout: float = opt(10.0, "Download timeout seconds"),
     limit: int | None = opt(None, "Optional cap on number of images"),
+    download_images: bool = opt(True, "Download COCO images"),
+    coco_train_base: str = opt(
+        "http://images.cocodataset.org/train2017", "COCO train2017 base URL"
+    ),
+    coco_val_base: str = opt(
+        "http://images.cocodataset.org/val2017", "COCO val2017 base URL"
+    ),
 ) -> None:
     out_root = Path(out_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -53,9 +60,8 @@ def main(
     images_dir = coco_root / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    meta_path = out_root / "sharegpt4v_coco.json"
-    meta_exists = meta_path.exists()
-    if meta_exists:
+    meta_path = out_root / "llava_instruct_150k.json"
+    if meta_path.exists():
         data = json.loads(meta_path.read_text(encoding="utf-8"))
         if not isinstance(data, list):
             raise ValueError("Existing metadata JSON must be a list.")
@@ -64,51 +70,54 @@ def main(
         typer.echo(f"downloading metadata from: {metadata_url}")
         data = download_json(metadata_url)
 
-    coco_entries: list[dict[str, object]] = []
+    entries: list[dict[str, object]] = []
     for entry in data:
         if not isinstance(entry, dict):
             continue
-        img_path = entry.get("image")
-        if not isinstance(img_path, str):
+        img = entry.get("image")
+        if not isinstance(img, str):
             continue
-        if not meta_exists and "coco/train2017" not in img_path:
-            continue
-
-        filename = Path(img_path).name
+        filename = Path(img).name
         new_entry = dict(entry)
         new_entry["image"] = filename
-        new_entry["source_url"] = f"http://images.cocodataset.org/train2017/{filename}"
         new_entry["filename"] = filename
-        coco_entries.append(new_entry)
-
-        if limit is not None and len(coco_entries) >= limit:
+        entries.append(new_entry)
+        if limit is not None and len(entries) >= limit:
             break
-
-    typer.echo(f"filtered {len(coco_entries)} COCO entries.")
 
     if not meta_path.exists():
         with meta_path.open("w", encoding="utf-8") as f:
-            json.dump(coco_entries, f, indent=2)
+            json.dump(entries, f, indent=2)
         typer.echo(f"saved metadata: {meta_path}")
 
-    def _task(entry: dict[str, object]) -> bool:
-        url = entry.get("source_url")
-        filename = entry.get("filename")
-        if not isinstance(url, str) or not isinstance(filename, str):
-            return False
-        return download_image(url, images_dir / filename, timeout=timeout)
+    if not download_images:
+        typer.echo("skipping image downloads.")
+        return
 
-    def _missing_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    def _task(entry: dict[str, object]) -> bool:
+        filename = entry.get("filename")
+        if not isinstance(filename, str):
+            return False
+        target = images_dir / filename
+        if target.exists():
+            return True
+        url_train = f"{coco_train_base}/{filename}"
+        if download_image(url_train, target, timeout=timeout):
+            return True
+        url_val = f"{coco_val_base}/{filename}"
+        return download_image(url_val, target, timeout=timeout)
+
+    def _missing_entries(items: list[dict[str, object]]) -> list[dict[str, object]]:
         missing: list[dict[str, object]] = []
-        for entry in entries:
+        for entry in items:
             filename = entry.get("filename")
             if isinstance(filename, str) and not (images_dir / filename).exists():
                 missing.append(entry)
         return missing
 
-    missing = _missing_entries(coco_entries)
+    missing = _missing_entries(entries)
     if not missing:
-        typer.echo(f"all {len(coco_entries)} images already present in {images_dir}")
+        typer.echo(f"all {len(entries)} images already present in {images_dir}")
         return
 
     typer.echo(f"downloading {len(missing)} images...")

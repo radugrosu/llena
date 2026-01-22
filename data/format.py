@@ -8,7 +8,7 @@ from typing import Iterable
 from PIL import Image
 from torch.utils.data import Dataset
 
-from mm.types import VQASample
+from mm.types import ChatConversation, InstructSample, VQASample
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,12 @@ class VQARecord:
     question: str
     answer: str
     answers: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class InstructRecord:
+    image_path: str
+    conversation: ChatConversation
 
 
 def _parse_record(obj: object) -> VQARecord:
@@ -43,6 +49,40 @@ def _parse_record(obj: object) -> VQARecord:
     return VQARecord(image_path=image_val, question=question, answer=answer, answers=answers)
 
 
+def _parse_conversation(obj: object) -> ChatConversation:
+    if not isinstance(obj, list):
+        raise TypeError("Record conversation must be a list.")
+    convo: ChatConversation = []
+    for item in obj:
+        if not isinstance(item, dict):
+            raise TypeError("Conversation message must be a dict.")
+        role = item.get("role")
+        content = item.get("content")
+        if not isinstance(role, str) or not isinstance(content, str):
+            raise TypeError("Conversation message requires 'role' and 'content' as str.")
+        role_l = role.lower()
+        if role_l not in {"user", "assistant", "system"}:
+            raise ValueError(f"Unsupported role in conversation: {role}")
+        convo.append({"role": role_l, "content": content})
+    if not convo:
+        raise ValueError("Conversation must not be empty.")
+    return convo
+
+
+def _parse_instruct_record(obj: object) -> InstructRecord:
+    if not isinstance(obj, dict):
+        raise TypeError(f"Expected dict record, got {type(obj).__name__}")
+
+    image_val = obj.get("image") if "image" in obj else obj.get("image_path")
+    if not isinstance(image_val, str):
+        raise TypeError("Record must include 'image' or 'image_path' as str.")
+
+    conv_val = obj.get("conversations") if "conversations" in obj else obj.get("conversation")
+    conversation = _parse_conversation(conv_val)
+
+    return InstructRecord(image_path=image_val, conversation=conversation)
+
+
 def _load_jsonl(path: Path) -> list[VQARecord]:
     records: list[VQARecord] = []
     with path.open("r", encoding="utf-8") as f:
@@ -52,6 +92,18 @@ def _load_jsonl(path: Path) -> list[VQARecord]:
                 continue
             obj = json.loads(line)
             records.append(_parse_record(obj))
+    return records
+
+
+def _load_jsonl_instruct(path: Path) -> list[InstructRecord]:
+    records: list[InstructRecord] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            records.append(_parse_instruct_record(obj))
     return records
 
 
@@ -235,6 +287,60 @@ class JsonlVQADataset(Dataset):
         return sample
 
 
+class JsonlInstructDataset(Dataset):
+    def __init__(
+        self,
+        *,
+        annotations_path: Path,
+        image_root: Path,
+        max_samples: int | None = None,
+    ):
+        if not annotations_path.exists():
+            raise FileNotFoundError(f"Annotations not found: {annotations_path}")
+        if not image_root.exists():
+            raise FileNotFoundError(f"Image root not found: {image_root}")
+
+        records = _load_jsonl_instruct(annotations_path)
+        if max_samples is not None and max_samples > 0:
+            records = records[:max_samples]
+
+        self.records = records
+        self.image_root = image_root
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int) -> InstructSample:
+        rec = self.records[idx]
+        img_path = self.image_root / rec.image_path
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image not found: {img_path}")
+        with Image.open(img_path) as im:
+            img = im.convert("RGB")
+
+        sample: InstructSample = {
+            "image": img,
+            "conversation": rec.conversation,
+        }
+        return sample
+
+
+class VqaAsInstructDataset(Dataset):
+    def __init__(self, base: Dataset):
+        self.base = base
+
+    def __len__(self) -> int:
+        return len(self.base)  # pyright: ignore[reportArgumentType]
+
+    def __getitem__(self, idx: int) -> InstructSample:
+        rec = self.base[idx]
+        conversation: ChatConversation = [
+            {"role": "user", "content": rec["question"]},
+            {"role": "assistant", "content": rec["answer"]},
+        ]
+        return {"image": rec["image"], "conversation": conversation}
+
+
 def load_vqa_jsonl_dataset(
     *,
     dataset: str,
@@ -244,6 +350,21 @@ def load_vqa_jsonl_dataset(
 ) -> JsonlVQADataset:
     annotations, image_root = resolve_dataset_paths(data_dir, dataset, split)
     return JsonlVQADataset(
+        annotations_path=annotations,
+        image_root=image_root,
+        max_samples=max_samples,
+    )
+
+
+def load_instruct_jsonl_dataset(
+    *,
+    dataset: str,
+    data_dir: Path,
+    split: str,
+    max_samples: int | None,
+) -> JsonlInstructDataset:
+    annotations, image_root = resolve_dataset_paths(data_dir, dataset, split)
+    return JsonlInstructDataset(
         annotations_path=annotations,
         image_root=image_root,
         max_samples=max_samples,

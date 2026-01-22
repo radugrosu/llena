@@ -1,8 +1,10 @@
 import torch
+from PIL import Image
 from transformers import AutoTokenizer, SiglipImageProcessor
 
 from data.synthetic import SyntheticVQADataset
-from mm.collator import LlenaCollator
+from mm.collator import LlenaCollator, LlenaPackedCollator
+from mm.types import InstructSample
 
 
 def test_collator_masks_prompt_and_mm_prefix() -> None:
@@ -41,3 +43,39 @@ def test_collator_masks_prompt_and_mm_prefix() -> None:
 
     # At least some labels should be unmasked (answer tokens exist)
     assert torch.any(out["labels"] != -100)
+
+
+def test_packed_collator_masks_assistant_turns() -> None:
+    llm_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    vision_name = "google/siglip-base-patch16-224"
+
+    tok = AutoTokenizer.from_pretrained(llm_name, trust_remote_code=True)
+    proc = SiglipImageProcessor.from_pretrained(vision_name)
+
+    img = Image.new("RGB", (224, 224), color=(0, 0, 0))
+    conversation = [
+        {"role": "user", "content": "What color is the ball?"},
+        {"role": "assistant", "content": "Red."},
+        {"role": "user", "content": "And what shape is it?"},
+        {"role": "assistant", "content": "Circle."},
+    ]
+    batch: list[InstructSample] = [{"image": img, "conversation": conversation}]
+
+    collator = LlenaPackedCollator(
+        tokenizer=tok,
+        image_processor=proc,
+        max_seq_len=256,
+        num_image_tokens=32,
+        pad_to_multiple_of=None,
+    )
+
+    out = collator(batch)
+
+    labels = out["labels"][0]
+    input_ids = out["input_ids"][0]
+    assert torch.any(labels != -100)
+
+    kept = input_ids[labels != -100].tolist()
+    decoded = tok.decode(kept, skip_special_tokens=True).lower()
+    assert "red" in decoded
+    assert "circle" in decoded

@@ -1,25 +1,25 @@
 # train.py
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import time
+from pathlib import Path
 
 import torch
 import typer
-from torch.utils.data import DataLoader, Dataset
-from transformers import SiglipImageProcessor
+from dotenv import load_dotenv
 from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
+from transformers import SiglipImageProcessor
+
 import wandb
-
-from scripts.utils import get_git_commit
-
+from data.format import VqaAsInstructDataset, load_instruct_jsonl_dataset, load_vqa_jsonl_dataset
+from data.synthetic import SyntheticVQADataset
+from mm.collator import LlenaCollator, LlenaPackedCollator
 from mm.config import load_config, save_resolved_config
 from mm.model import LlenaModel, LlenaModelConfig
-from mm.collator import LlenaCollator
 from mm.run_config import RunConfig, Stage
-from data.synthetic import SyntheticVQADataset
-from data.format import load_vqa_jsonl_dataset
+from scripts.utils import get_git_commit
 
 
 def opt(default: object, help: str):
@@ -47,27 +47,56 @@ def get_device(device: str, *, force_cuda: bool) -> torch.device:
     raise ValueError(f"device must be auto|cpu|cuda, got: {device}")
 
 
-def build_dataset(rc: RunConfig) -> Dataset:
+def build_dataset(
+    rc: RunConfig,
+    *,
+    split: str | None = None,
+    max_samples: int | None = None,
+) -> Dataset:
+    use_split = split or rc.data.split
+    cap = max_samples if max_samples is not None else (rc.data.num_samples if rc.data.num_samples > 0 else None)
     if rc.data.dataset == "synthetic":
         return SyntheticVQADataset(
-            num_samples=rc.data.num_samples,
+            num_samples=cap or rc.data.num_samples,
             image_size=rc.data.image_size,
             seed=rc.train.seed,
         )
+    if rc.data.dataset == "llava_instruct":
+        return load_instruct_jsonl_dataset(
+            dataset=rc.data.dataset,
+            data_dir=Path(rc.data.data_dir),
+            split=use_split,
+            max_samples=cap,
+        )
+    if rc.data.dataset == "llava_textvqa":
+        llava_ds = load_instruct_jsonl_dataset(
+            dataset="llava_instruct",
+            data_dir=Path(rc.data.data_dir),
+            split=use_split,
+            max_samples=None,
+        )
+        text_ds = load_vqa_jsonl_dataset(
+            dataset="textvqa",
+            data_dir=Path(rc.data.data_dir),
+            split=use_split,
+            max_samples=None,
+        )
+        mix = ConcatDataset([llava_ds, VqaAsInstructDataset(text_ds)])
+        if cap is None:
+            return mix
+        return torch.utils.data.Subset(mix, range(cap))
     if rc.data.dataset == "sharegpt4v_coco":
-        max_samples = rc.data.num_samples if rc.data.num_samples > 0 else None
         return load_vqa_jsonl_dataset(
             dataset=rc.data.dataset,
             data_dir=Path(rc.data.data_dir),
-            split=rc.data.split,
-            max_samples=max_samples,
+            split=use_split,
+            max_samples=cap,
         )
-    max_samples = rc.data.num_samples if rc.data.num_samples > 0 else None
     return load_vqa_jsonl_dataset(
         dataset=rc.data.dataset,
         data_dir=Path(rc.data.data_dir),
-        split=rc.data.split,
-        max_samples=max_samples,
+        split=use_split,
+        max_samples=cap,
     )
 
 
@@ -90,6 +119,36 @@ def trainable_param_summary(
     return {"total": total, "trainable": trainable, "pct": pct, "prefixes": prefixes}
 
 
+def eval_loop(
+    model: LlenaModel,
+    dl: DataLoader,
+    device: torch.device,
+    *,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> float:
+    model.eval()
+    total_loss = 0.0
+    count = 0
+    with torch.no_grad():
+        for batch in dl:
+            batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                out = model(
+                    pixel_values=batch_t["pixel_values"],
+                    input_ids=batch_t["input_ids"],
+                    mm_attention_mask=batch_t["mm_attention_mask"],
+                    mm_labels=batch_t["mm_labels"],
+                )
+                loss = out.loss
+            total_loss += float(loss.item())
+            count += 1
+    model.train()
+    if count == 0:
+        return float("nan")
+    return total_loss / count
+
+
 def _ckpt_cfg(model: LlenaModel) -> dict[str, object]:
     return {
         "llm_name": model.cfg.llm_name,
@@ -109,6 +168,9 @@ def save_ckpt(
     *,
     stage: Stage,
     save_trainable_only: bool,
+    wandb_run_id: str | None,
+    wandb_project: str | None,
+    run_config: dict[str, object],
 ) -> None:
     save_path = out_dir / f"step_{step}"
     save_path.mkdir(parents=True, exist_ok=True)
@@ -118,7 +180,12 @@ def save_ckpt(
         "step": step,
         "cfg": _ckpt_cfg(model),
         "optimizer": optm.state_dict(),
+        "run_config": run_config,
     }
+    if wandb_run_id is not None:
+        payload["wandb_run_id"] = wandb_run_id
+    if wandb_project is not None:
+        payload["wandb_project"] = wandb_project
 
     if save_trainable_only and stage in {"projector", "peft_lora", "peft_qlora"}:
         payload["projector"] = model.projector.state_dict()
@@ -138,6 +205,8 @@ def load_ckpt(
     model: LlenaModel,
     optm: torch.optim.Optimizer,
     device: torch.device,
+    *,
+    expected_stage: Stage | None = None,
 ) -> tuple[int, str]:
     ckpt = torch.load(ckpt_path, map_location=device)
     step = int(ckpt["step"])
@@ -154,7 +223,10 @@ def load_ckpt(
             raise RuntimeError("Checkpoint has adapter weights but current model is not PEFT-wrapped.")
         set_peft_model_state_dict(model.llm, ckpt["adapter"])
 
-    if "optimizer" in ckpt:
+    if expected_stage is not None and stage != expected_stage:
+        typer.echo(f"ckpt: stage mismatch (ckpt_stage={stage} expected={expected_stage}); skipping optimizer")
+        step = 0
+    elif "optimizer" in ckpt:
         optm.load_state_dict(ckpt["optimizer"])
 
     typer.echo(f"ckpt: loaded {ckpt_path}")
@@ -163,16 +235,17 @@ def load_ckpt(
 
 def main(
     config: str = opt(..., "Path to YAML config"),
-    stage: Stage = opt("smoke", "Stage: smoke | projector | peft_lora | peft_qlora"),
-    max_steps: int = opt(200, "Max training steps"),
-    out_dir: str = opt("artifacts/ckpt_run", "Output directory for checkpoints/config"),
+    stage: Stage = opt("smoke", "Stage: smoke | projector | peft_lora | peft_qlora | full_ft"),
+    max_steps: int | None = opt(None, "Max training steps"),
+    out_dir: str = opt("artifacts", "Base output directory for checkpoints/config"),
     resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
     save_every: int | None = opt(None, "Override train.save_every (int). If None, use config."),
     save_trainable_only: bool = opt(True, "If true, saves only projector/adapters for PEFT stages."),
     override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
 ) -> None:
+    load_dotenv()
     commit = get_git_commit()
-    if stage not in {"smoke", "projector", "peft_lora", "peft_qlora"}:
+    if stage not in {"smoke", "projector", "peft_lora", "peft_qlora", "full_ft"}:
         raise ValueError(f"Unknown stage: {stage}")
 
     raw_cfg = load_config(config, overrides=override)
@@ -181,7 +254,9 @@ def main(
     qlora_enable = stage == "peft_qlora"
     device = get_device(rc.train.device, force_cuda=qlora_enable)
 
-    out_path = Path(out_dir)
+    run_stamp = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = f"{rc.project.run_name}_{run_stamp}"
+    out_path = Path(out_dir) / run_dir
     out_path.mkdir(parents=True, exist_ok=True)
 
     save_resolved_config(raw_cfg, out_path / "resolved_config.yaml")
@@ -219,17 +294,27 @@ def main(
     )
     typer.echo(f"effective_batch_size={rc.effective_batch_size()}")
 
+    typer.echo("init: loading image processor")
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
 
     ds = build_dataset(rc)
 
-    collator = LlenaCollator(
-        tokenizer=model.tokenizer,
-        image_processor=image_proc,
-        max_seq_len=rc.train.max_seq_len,
-        num_image_tokens=rc.mm.num_image_tokens,
-        pad_to_multiple_of=8,
-    )
+    if rc.data.dataset in {"llava_instruct", "llava_textvqa"}:
+        collator = LlenaPackedCollator(
+            tokenizer=model.tokenizer,
+            image_processor=image_proc,
+            max_seq_len=rc.train.max_seq_len,
+            num_image_tokens=rc.mm.num_image_tokens,
+            pad_to_multiple_of=8,
+        )
+    else:
+        collator = LlenaCollator(
+            tokenizer=model.tokenizer,
+            image_processor=image_proc,
+            max_seq_len=rc.train.max_seq_len,
+            num_image_tokens=rc.mm.num_image_tokens,
+            pad_to_multiple_of=8,
+        )
 
     dl = DataLoader(
         ds,
@@ -238,6 +323,19 @@ def main(
         collate_fn=collator,
         num_workers=0,
     )
+
+    eval_every = rc.train.eval_every
+    eval_max_samples = rc.train.eval_max_samples
+    val_dl: DataLoader | None = None
+    if eval_every > 0:
+        val_ds = build_dataset(rc, split="validation", max_samples=eval_max_samples or None)
+        val_dl = DataLoader(
+            val_ds,
+            batch_size=rc.train.micro_batch_size,
+            shuffle=False,
+            collate_fn=collator,
+            num_workers=0,
+        )
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if not trainable_params:
@@ -255,8 +353,17 @@ def main(
     save_every_eff = save_every if save_every is not None else rc.train.save_every
     max_grad_norm = rc.train.max_grad_norm
 
+    wandb_run_id: str | None = None
+    wandb_project: str | None = None
     if rc.logging.backend == "wandb":
         wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
+        if wandb.run is not None:
+            wandb_run_id = wandb.run.id
+            wandb_project = wandb.run.project
+        wandb.define_metric("global_step", hidden=True)
+        wandb.define_metric("train/*", step_metric="global_step")
+        wandb.define_metric("val/*", step_metric="global_step")
+        wandb.define_metric("textvqa_eval/*", step_metric="global_step")
     elif rc.logging.backend == "mlflow":
         raise NotImplementedError("mlflow logging not implemented.")
 
@@ -267,7 +374,7 @@ def main(
             ckpt_path = ckpt_path / "ckpt.pt"
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
-        start_step, ckpt_stage = load_ckpt(ckpt_path, model, optm, device)
+        start_step, ckpt_stage = load_ckpt(ckpt_path, model, optm, device, expected_stage=stage)
         typer.echo(f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})")
 
     model.train()
@@ -275,6 +382,9 @@ def main(
 
     step = start_step
     last_loss = 0.0
+    last_log_step = start_step
+    last_log_time = time.perf_counter()
+    last_log_tokens = 0
     for batch in dl:
         step += 1
         batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
@@ -291,15 +401,49 @@ def main(
         loss.backward()
 
         if step % accum == 0:
-            torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
             optm.step()
             optm.zero_grad(set_to_none=True)
 
         if step % log_every == 0:
+            now = time.perf_counter()
+            steps_delta = step - last_log_step
+            dt = max(now - last_log_time, 1e-8)
+            tokens_in_batch = int(batch_t["mm_attention_mask"].sum().item())
+            last_log_tokens += tokens_in_batch
+            tokens_per_s = last_log_tokens / dt
+            samples_per_s = (rc.train.micro_batch_size * steps_delta) / dt if steps_delta > 0 else 0.0
+
             last_loss = float(loss.item() * accum)
-            typer.echo(f"stage={stage} step={step} loss={last_loss:.4f}")
+            typer.echo(
+                f"stage={stage} step={step} loss={last_loss:.4f} samples/s={samples_per_s:.2f} tok/s={tokens_per_s:.0f}"
+            )
             if rc.logging.backend == "wandb":
-                wandb.log({"train/loss": last_loss, "step": step})
+                wandb.log(
+                    {
+                        "global_step": step,
+                        "train/loss": last_loss,
+                        "train/samples_per_s": samples_per_s,
+                        "train/tokens_per_s": tokens_per_s,
+                    }
+                )
+            last_log_step = step
+            last_log_time = now
+            last_log_tokens = 0
+
+        if eval_every > 0 and val_dl is not None and step % eval_every == 0:
+            typer.echo(f"val: starting eval at step={step}")
+            val_loss = eval_loop(
+                model,
+                val_dl,
+                device,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+            )
+            typer.echo(f"val: step={step} loss={val_loss:.4f}")
+            if rc.logging.backend == "wandb":
+                wandb.log({"global_step": step, "val/loss": val_loss})
 
         if save_every_eff > 0 and step % save_every_eff == 0:
             save_ckpt(
@@ -309,9 +453,12 @@ def main(
                 optm,
                 stage=stage,
                 save_trainable_only=save_trainable_only,
+                wandb_run_id=wandb_run_id,
+                wandb_project=wandb_project,
+                run_config=raw_cfg,
             )
 
-        if step >= max_steps:
+        if max_steps and step >= max_steps:
             break
 
     save_ckpt(
@@ -321,7 +468,11 @@ def main(
         optm,
         stage=stage,
         save_trainable_only=save_trainable_only,
+        wandb_run_id=wandb_run_id,
+        wandb_project=wandb_project,
+        run_config=raw_cfg,
     )
+
     typer.echo("done")
 
     report = {
@@ -331,7 +482,7 @@ def main(
         "ckpt_dir": str(out_path / f"step_{step}"),
         "commit": commit,
     }
-    report_path = Path(rc.paths.reports_dir) / f"train_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    report_path = Path(rc.paths.reports_dir) / f"train_{rc.project.run_name}_step{step}_{stage}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, sort_keys=True)

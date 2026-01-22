@@ -13,7 +13,7 @@ Key goals:
 ```bash
 uv sync
 uv run python -m scripts.train --config configs/local/textvqa_train.yaml --stage projector --max-steps 50
-uv run python -m scripts.eval --config configs/local/textvqa_eval.yaml
+uv run python -m scripts.eval --ckpt artifacts/<run>/step_100 --override data.split=validation
 ```
 
 ## Data pipeline
@@ -54,6 +54,17 @@ datasets/processed/
     images/...
 ```
 
+### COCO shared image store (ShareGPT4V/LLaVA-Instruct)
+
+COCO images are stored once under:
+
+```
+datasets/raw/coco2017/
+  images/...
+```
+
+Both ShareGPT4V-COCO and LLaVA-Instruct download/process scripts use this shared store by default to avoid duplicate downloads. Processed datasets symlink images into their own `datasets/processed/<dataset>/images` folders.
+
 ## Training
 
 Stage‑driven runs:
@@ -66,8 +77,7 @@ uv run python -m scripts.train --config configs/cloud/textvqa_train.yaml --stage
 ## Evaluation
 
 ```bash
-uv run python -m scripts.eval --config configs/local/textvqa_eval.yaml
-uv run python -m scripts.eval --config configs/local/docvqa_eval.yaml
+uv run python -m scripts.eval --ckpt artifacts/<run>/step_100 --override data.split=validation
 ```
 
 Eval outputs:

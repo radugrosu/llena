@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 from transformers import SiglipImageProcessor
 
-from mm.types import ChatTokenizer, VQASample
+from mm.types import ChatConversation, ChatTokenizer, InstructSample, VQASample
 
 
 def _ensure_pad_token(tokenizer: ChatTokenizer) -> int:
@@ -48,6 +48,57 @@ def _encode_chat_sft(
         raise ValueError("max_len must be > 0")
     prompt_len = len(prompt_ids)
     labels = [-100] * prompt_len + full_ids[prompt_len:]
+    if len(full_ids) <= max_len:
+        return full_ids, labels
+    return full_ids[:max_len], labels[:max_len]
+
+
+def _encode_chat_packed(
+    tokenizer: ChatTokenizer,
+    conversation: ChatConversation,
+    max_len: int,
+) -> tuple[list[int], list[int]]:
+    if max_len <= 0:
+        raise ValueError("max_len must be > 0")
+    if not conversation:
+        raise ValueError("conversation must be non-empty")
+
+    full_ids = tokenizer.apply_chat_template(
+        conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+        return_tensors=None,
+    )
+    labels = [-100] * len(full_ids)
+
+    for idx, msg in enumerate(conversation):
+        role = msg.get("role")
+        if role != "assistant":
+            continue
+        prefix = conversation[:idx]
+        ids_before = tokenizer.apply_chat_template(
+            prefix,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_tensors=None,
+        )
+        ids_up_to = tokenizer.apply_chat_template(
+            conversation[: idx + 1],
+            add_generation_prompt=False,
+            tokenize=True,
+            return_tensors=None,
+        )
+        if ids_up_to[: len(ids_before)] != ids_before:
+            raise ValueError("Chat template mismatch while building packed labels.")
+        start = len(ids_before)
+        end = len(ids_up_to)
+        for j in range(start, end):
+            if j < len(full_ids):
+                labels[j] = full_ids[j]
+
+    if all(x == -100 for x in labels):
+        raise ValueError("No assistant tokens found for packed conversation.")
+
     if len(full_ids) <= max_len:
         return full_ids, labels
     return full_ids[:max_len], labels[:max_len]
@@ -125,6 +176,60 @@ class LlenaCollator:
                 self.tokenizer,
                 ex["question"],
                 ex["answer"],
+                self.max_seq_len,
+            )
+            input_id_seqs.append(full_ids)
+            label_seqs.append(labels)
+
+        input_ids, attention_mask = _pad_batch_1d(
+            input_id_seqs,
+            pad_value=pad_id,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+        )
+
+        labels_t, _ = _pad_batch_1d(
+            label_seqs,
+            pad_value=-100,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+        )
+        labels_t = labels_t.to(torch.long)
+
+        mm_labels, mm_attention_mask = prepend_mm_prefix(
+            labels_t, attention_mask, self.num_image_tokens
+        )
+
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels_t,
+            "mm_labels": mm_labels,
+            "mm_attention_mask": mm_attention_mask,
+        }
+
+
+@dataclass
+class LlenaPackedCollator:
+    tokenizer: ChatTokenizer
+    image_processor: SiglipImageProcessor
+    max_seq_len: int
+    num_image_tokens: int = 256
+    pad_to_multiple_of: int | None = 8
+
+    def __call__(self, batch: list[InstructSample]) -> dict[str, torch.Tensor]:
+        pad_id = _ensure_pad_token(self.tokenizer)
+
+        images = [ex["image"] for ex in batch]
+        vision = self.image_processor(images=images, return_tensors="pt")
+        pixel_values = vision["pixel_values"]
+
+        input_id_seqs: list[list[int]] = []
+        label_seqs: list[list[int]] = []
+
+        for ex in batch:
+            full_ids, labels = _encode_chat_packed(
+                self.tokenizer,
+                ex["conversation"],
                 self.max_seq_len,
             )
             input_id_seqs.append(full_ids)

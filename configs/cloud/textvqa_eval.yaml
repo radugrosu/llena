@@ -1,7 +1,7 @@
 # configs/cloud/textvqa_eval.yaml
 project:
   name: llena
-  run_name: "cloud_textvqa_eval_0.5b"
+  run_name: "auto"
 
 paths:
   artifacts_dir: "artifacts"
@@ -17,8 +17,6 @@ model:
 mm:
   num_image_tokens: 256
   projector: "mlp2"
-  perceiver_latents: 64
-  perceiver_layers: 2
 
 train:
   seed: 42
@@ -54,11 +52,6 @@ data:
   split: "validation"
   num_samples: 0
   image_size: 224
-
-eval:
-  enabled: true
-  max_samples: 0
-  batch_size: 8
 
 logging:
   backend: "wandb"

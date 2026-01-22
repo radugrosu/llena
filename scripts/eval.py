@@ -3,12 +3,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 import json
-import time
+from typing import cast
 
 import torch
 import typer
 from torch.utils.data import DataLoader, Dataset
 from transformers import SiglipImageProcessor
+from dotenv import load_dotenv
 from peft import PeftModel, set_peft_model_state_dict
 import wandb
 
@@ -19,12 +20,25 @@ from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator
 from mm.model import LlenaModel, LlenaModelConfig
 from mm.run_config import RunConfig, Stage
-from mm.config import load_config
 from mm.types import VQASample
 
 
 def opt(default: object, help: str):
     return typer.Option(default, help=help)
+
+
+def _apply_overrides(cfg: dict[str, object], overrides: list[str]) -> dict[str, object]:
+    if not overrides:
+        return cfg
+    from mm.config import _set_dotted_key  # type: ignore[reportPrivateImportUsage]
+
+    out = dict(cfg)
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"Override must be KEY=VALUE, got: {item}")
+        k, v = item.split("=", 1)
+        _set_dotted_key(out, k.strip(), v.strip())
+    return out
 
 
 def get_device(device: str, *, force_cuda: bool) -> torch.device:
@@ -51,6 +65,8 @@ def build_dataset(rc: RunConfig, *, max_samples: int | None) -> Dataset:
             image_size=rc.data.image_size,
             seed=rc.train.seed,
         )
+    if rc.data.dataset in {"llava_instruct", "llava_textvqa"}:
+        raise ValueError("llava_instruct is not supported for eval.")
     cap = rc.data.num_samples if max_samples is None else max_samples
     return load_vqa_jsonl_dataset(
         dataset=rc.data.dataset,
@@ -69,6 +85,28 @@ def _ckpt_path(path: str) -> Path:
     return p
 
 
+def _load_ckpt_meta(path: str) -> dict[str, object]:
+    ckpt = torch.load(_ckpt_path(path), map_location="cpu", mmap=True)
+    return ckpt
+
+
+def _detect_stage(path: str) -> Stage:
+    ckpt = _load_ckpt_meta(path)
+    stage = str(ckpt.get("stage", ""))
+    if stage in ("smoke", "projector", "peft_lora", "peft_qlora", "full_ft"):
+        return stage
+    else:
+        raise ValueError(f"Checkpoint stage is unknown or missing: {stage!r}")
+
+
+def _detect_step(path: str) -> int:
+    ckpt = _load_ckpt_meta(path)
+    step = ckpt.get("step")
+    if isinstance(step, (int, float)):
+        return int(step)
+    raise ValueError(f"No valid step found: {step}")
+
+
 def load_eval_ckpt(path: str, model: LlenaModel, device: torch.device) -> None:
     ckpt = torch.load(_ckpt_path(path), map_location=device)
 
@@ -80,9 +118,7 @@ def load_eval_ckpt(path: str, model: LlenaModel, device: torch.device) -> None:
 
     if "adapter" in ckpt:
         if not model.cfg.peft_enable or not isinstance(model.llm, PeftModel):
-            raise RuntimeError(
-                "Checkpoint has adapter weights but current model is not PEFT-wrapped."
-            )
+            raise RuntimeError("Checkpoint has adapter weights but current model is not PEFT-wrapped.")
         set_peft_model_state_dict(model.llm, ckpt["adapter"])
     typer.echo(f"ckpt: loaded {_ckpt_path(path)}")
 
@@ -208,7 +244,6 @@ def eval_loop(
 
 def run_eval(
     *,
-    config: str,
     stage: Stage,
     ckpt: str,
     batch_size: int | None,
@@ -217,7 +252,11 @@ def run_eval(
     log_every: int,
 ) -> tuple[dict[str, float], str]:
     commit = get_git_commit()
-    raw_cfg = load_config(config, overrides=override)
+    ckpt_meta = _load_ckpt_meta(ckpt)
+    raw_cfg = ckpt_meta.get("run_config")
+    if not isinstance(raw_cfg, dict):
+        raise ValueError("Checkpoint missing run_config; cannot run eval without config.")
+    raw_cfg = _apply_overrides(raw_cfg, override)
     rc = RunConfig.from_dict(raw_cfg)
 
     qlora_enable = stage == "peft_qlora"
@@ -240,21 +279,42 @@ def run_eval(
         device="cuda" if device.type == "cuda" else "cpu",
     )
 
+    typer.echo("eval: building model")
     model = LlenaModel(mcfg)
 
+    typer.echo("eval: loading checkpoint")
     load_eval_ckpt(ckpt, model, device)
 
+    run_id: str | None = None
     if rc.logging.backend == "wandb":
-        wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
+        meta = _load_ckpt_meta(ckpt)
+        run_id_val = meta.get("wandb_run_id")
+        project_val = meta.get("wandb_project")
+        if not isinstance(run_id_val, str) or not run_id_val:
+            typer.echo("eval: wandb_run_id missing in checkpoint; skipping W&B logging.")
+        else:
+            run_id = run_id_val
+            project_name = str(project_val) if isinstance(project_val, str) and project_val else rc.project.name
+            wandb.init(
+                id=run_id,
+                resume="allow",
+                project=project_name,
+                name=rc.project.run_name,
+                config=raw_cfg,
+            )
+            wandb.define_metric("global_step", hidden=True)
+            wandb.define_metric("eval/*", step_metric="global_step")
     elif rc.logging.backend == "mlflow":
         raise NotImplementedError("mlflow logging not implemented.")
 
+    typer.echo("eval: loading image processor")
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
     if batch_size is None:
         batch_size = rc.eval.batch_size
     if max_samples is None:
         max_samples = rc.eval.max_samples
 
+    typer.echo(f"eval: building dataset split={rc.data.split} max_samples={max_samples}")
     ds = build_dataset(rc, max_samples=max_samples)
 
     collator = LlenaCollator(
@@ -285,9 +345,14 @@ def run_eval(
         num_workers=0,
     )
 
+    typer.echo("eval: starting eval loop")
     metrics = eval_loop(model, dl, device, rc.data.dataset, log_every)
-    if rc.logging.backend == "wandb":
-        wandb.log({f"eval/{k}": v for k, v in metrics.items() if k != "count"})
+    if rc.logging.backend == "wandb" and run_id is not None:
+        payload = {f"eval/{k}": v for k, v in metrics.items() if k != "count"}
+        ckpt_step = _detect_step(ckpt)
+        if ckpt_step >= 0:
+            payload["global_step"] = float(ckpt_step)
+        wandb.log(payload)
     report = {
         "dataset": rc.data.dataset,
         "split": rc.data.split,
@@ -295,31 +360,45 @@ def run_eval(
         "metrics": metrics,
         "commit": commit,
     }
-    report_path = Path(rc.paths.reports_dir) / f"eval_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    ckpt_step = _detect_step(ckpt)
+    report_path = (
+        Path(rc.paths.reports_dir)
+        / f"eval_{rc.project.run_name}_step{ckpt_step}_{rc.data.dataset}_{rc.data.split}.json"
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, sort_keys=True)
         f.write("\n")
 
-    if rc.logging.backend == "wandb":
+    if rc.logging.backend == "wandb" and run_id is not None:
         wandb.finish()
 
     return metrics, rc.data.dataset
 
 
 def main(
-    config: str = opt(..., "Path to YAML config"),
-    stage: Stage = opt("smoke", "Stage: smoke | projector | peft_lora | peft_qlora"),
+    stage: str = opt("auto", "Stage: auto | smoke | projector | peft_lora | peft_qlora | full_ft"),
     ckpt: str = opt(..., "Path to a ckpt.pt or a step_* directory"),
     batch_size: int | None = opt(None, "Eval batch size (None = config)"),
     max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
+    dataset: str | None = opt(None, "Override data.dataset for eval"),
+    split: str | None = opt(None, "Override data.split for eval"),
     override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
     log_every: int = opt(100, "Log progress every N batches (0 disables)"),
 ) -> None:
+    load_dotenv()
     typer.echo("eval: starting", err=True)
+    if stage == "auto":
+        stage = _detect_stage(ckpt)
+        typer.echo(f"eval: detected stage={stage}", err=True)
+    if stage not in {"smoke", "projector", "peft_lora", "peft_qlora", "full_ft"}:
+        raise ValueError(f"Unknown stage: {stage}")
+    if dataset is not None:
+        override.append(f"data.dataset={dataset}")
+    if split is not None:
+        override.append(f"data.split={split}")
     metrics, dataset = run_eval(
-        config=config,
-        stage=stage,
+        stage=cast(Stage, stage),
         ckpt=ckpt,
         batch_size=batch_size,
         max_samples=max_samples,

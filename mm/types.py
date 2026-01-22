@@ -14,6 +14,11 @@ ChatMessage: TypeAlias = dict[str, str]  # {"role": "...", "content": "..."}
 ChatConversation: TypeAlias = list[ChatMessage]
 
 
+class InstructSample(TypedDict):
+    image: Image.Image
+    conversation: ChatConversation
+
+
 class ChatTokenizer(Protocol):
     """
     Specific to Qwen2.5 Instruct tokenizer usage:

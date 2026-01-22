@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Literal, cast
 
 
-Stage = Literal["smoke", "projector", "peft_lora", "peft_qlora"]
-DatasetName = Literal["synthetic", "docvqa", "textvqa", "sharegpt4v_coco"]
+Stage = Literal["smoke", "projector", "peft_lora", "peft_qlora", "full_ft"]
+DatasetName = Literal[
+    "synthetic",
+    "docvqa",
+    "textvqa",
+    "sharegpt4v_coco",
+    "llava_instruct",
+    "llava_textvqa",
+]
 LogBackend = Literal["none", "wandb", "mlflow"]
 
 
@@ -31,6 +39,35 @@ class DataConfig:
     image_size: int
 
 
+def _normalize_llm_token(llm_name: str) -> str:
+    lower = llm_name.lower()
+    token = lower.split("/")[-1]
+    token = re.sub(r"-(instruct|chat|base)$", "", token)
+    token = re.sub(r"[^a-z0-9.\-]+", "", token)
+    return token or "llm"
+
+
+def _normalize_vision_token(vision_name: str) -> str:
+    lower = vision_name.lower()
+    if "siglip" in lower:
+        numbers = re.findall(r"(\d{3,4})", lower)
+        if numbers:
+            return f"siglip{numbers[-1]}"
+        return "siglip"
+
+    token = lower.split("/")[-1]
+    token = re.sub(r"[^a-z0-9.]+", "", token)
+    return token or "vision"
+
+
+def _compute_run_name(*, data: DataConfig, model: ModelConfig) -> str:
+    split = data.split.lower()
+    dataset = data.dataset
+    llm = _normalize_llm_token(model.llm_name)
+    vision = _normalize_vision_token(model.vision_name)
+    return f"{dataset}_{split}_{llm}_{vision}"
+
+
 @dataclass(frozen=True)
 class TrainConfig:
     seed: int
@@ -43,6 +80,8 @@ class TrainConfig:
 
     log_every: int
     save_every: int
+    eval_every: int
+    eval_max_samples: int
     max_grad_norm: float
 
     gradient_checkpointing: bool
@@ -99,14 +138,20 @@ class RunConfig:
         # --- Project ---
         project_d = d.get("project")
         if not isinstance(project_d, dict):
-            raise ValueError("project must be a dict with name and run_name")
+            raise ValueError("project must be a dict with name and optional run_name")
         name = project_d.get("name")
-        run_name = project_d.get("run_name")
+        run_name_raw = project_d.get("run_name")
         if not isinstance(name, str) or not name:
             raise ValueError("project.name must be a non-empty string")
-        if not isinstance(run_name, str) or not run_name:
-            raise ValueError("project.run_name must be a non-empty string")
-        project = ProjectConfig(name=name, run_name=run_name)
+        run_name: str | None
+        if run_name_raw is None:
+            run_name = None
+        elif isinstance(run_name_raw, str) and run_name_raw.lower() == "auto":
+            run_name = None
+        elif isinstance(run_name_raw, str) and run_name_raw:
+            run_name = run_name_raw
+        else:
+            raise ValueError("project.run_name must be 'auto' or a non-empty string")
 
         # --- Model ---
         model_d = d["model"]
@@ -129,9 +174,16 @@ class RunConfig:
         # --- Data ---
         data_d = d["data"]
         dataset = str(data_d["dataset"]).lower()
-        if dataset not in {"synthetic", "docvqa", "textvqa", "sharegpt4v_coco"}:
+        if dataset not in {
+            "synthetic",
+            "docvqa",
+            "textvqa",
+            "sharegpt4v_coco",
+            "llava_instruct",
+            "llava_textvqa",
+        }:
             raise ValueError(
-                "data.dataset must be one of synthetic|docvqa|textvqa|sharegpt4v_coco, "
+                "data.dataset must be one of synthetic|docvqa|textvqa|sharegpt4v_coco|llava_instruct|llava_textvqa, "
                 f"got: {data_d['dataset']}"
             )
         data_dir = str(data_d.get("data_dir", "datasets/processed"))
@@ -186,6 +238,8 @@ class RunConfig:
             max_seq_len=int(train_d["max_seq_len"]),
             log_every=int(train_d["log_every"]),
             save_every=int(train_d["save_every"]),
+            eval_every=int(train_d.get("eval_every", 0)),
+            eval_max_samples=int(train_d.get("eval_max_samples", 0)),
             max_grad_norm=float(train_d["max_grad_norm"]),
             gradient_checkpointing=bool(train_d["gradient_checkpointing"]),
             lr_projector=float(train_d["lr_projector"]),
@@ -212,15 +266,23 @@ class RunConfig:
 
         # --- Eval ---
         eval_d = d.get("eval")
-        if not isinstance(eval_d, dict):
+        if eval_d is None:
+            eval_cfg = EvalConfig(enabled=False, max_samples=0, batch_size=1)
+        elif not isinstance(eval_d, dict):
             raise ValueError("eval must be a dict with enabled, max_samples, batch_size")
-        if "batch_size" not in eval_d:
-            raise ValueError("eval.batch_size is required")
-        eval_cfg = EvalConfig(
-            enabled=bool(eval_d.get("enabled", True)),
-            max_samples=int(eval_d.get("max_samples", 0)),
-            batch_size=int(eval_d["batch_size"]),
-        )
+        else:
+            if "batch_size" not in eval_d:
+                raise ValueError("eval.batch_size is required")
+            eval_cfg = EvalConfig(
+                enabled=bool(eval_d.get("enabled", True)),
+                max_samples=int(eval_d.get("max_samples", 0)),
+                batch_size=int(eval_d["batch_size"]),
+            )
+
+        if run_name is None:
+            run_name = _compute_run_name(data=data, model=model)
+
+        project = ProjectConfig(name=name, run_name=run_name)
 
         return RunConfig(
             project=project,
