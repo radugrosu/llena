@@ -258,6 +258,9 @@ def run_eval(
         raise ValueError("Checkpoint missing run_config; cannot run eval without config.")
     raw_cfg = _apply_overrides(raw_cfg, override)
     rc = RunConfig.from_dict(raw_cfg)
+    base_run_name = raw_cfg["project"]["run_name"]
+    if not isinstance(base_run_name, str) or not base_run_name:
+        raise ValueError("project.run_name must be a non-empty string in checkpoint config")
 
     qlora_enable = stage == "peft_qlora"
     device = get_device(rc.train.device, force_cuda=qlora_enable)
@@ -299,7 +302,7 @@ def run_eval(
                 id=run_id,
                 resume="allow",
                 project=project_name,
-                name=rc.project.run_name,
+                name=base_run_name,
                 config=raw_cfg,
             )
             wandb.define_metric("global_step", hidden=True)

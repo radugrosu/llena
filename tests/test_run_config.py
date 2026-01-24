@@ -3,7 +3,7 @@ from mm.run_config import RunConfig
 
 def _base_cfg() -> dict:
     return {
-        "project": {"name": "llena", "run_name": "auto"},
+        "project": {"name": "llena"},
         "paths": {"artifacts_dir": "artifacts", "reports_dir": "reports"},
         "model": {
             "llm_name": "Qwen/Qwen2.5-0.5B-Instruct",

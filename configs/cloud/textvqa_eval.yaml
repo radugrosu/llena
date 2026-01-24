@@ -1,7 +1,6 @@
 # configs/cloud/textvqa_eval.yaml
 project:
   name: llena
-  run_name: "auto"
 
 paths:
   artifacts_dir: "artifacts"

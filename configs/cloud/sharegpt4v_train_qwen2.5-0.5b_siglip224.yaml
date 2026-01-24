@@ -1,6 +1,5 @@
 project:
   name: llena
-  run_name: auto
 paths:
   artifacts_dir: artifacts
   reports_dir: reports

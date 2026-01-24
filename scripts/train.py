@@ -250,6 +250,7 @@ def main(
 
     raw_cfg = load_config(config, overrides=override)
     rc = RunConfig.from_dict(raw_cfg)
+    raw_cfg["project"]["run_name"] = rc.project.run_name  # pyright: ignore[reportIndexIssue]
 
     qlora_enable = stage == "peft_qlora"
     device = get_device(rc.train.device, force_cuda=qlora_enable)
@@ -258,6 +259,7 @@ def main(
     run_dir = f"{rc.project.run_name}_{run_stamp}"
     out_path = Path(out_dir) / run_dir
     out_path.mkdir(parents=True, exist_ok=True)
+    (Path(out_dir) / "latest_run.txt").write_text(str(out_path), encoding="utf-8")
 
     save_resolved_config(raw_cfg, out_path / "resolved_config.yaml")
     set_seed(rc.train.seed)

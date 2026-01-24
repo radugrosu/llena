@@ -139,19 +139,8 @@ class RunConfig:
         project_d = d.get("project")
         if not isinstance(project_d, dict):
             raise ValueError("project must be a dict with name and optional run_name")
-        name = project_d.get("name")
-        run_name_raw = project_d.get("run_name")
-        if not isinstance(name, str) or not name:
-            raise ValueError("project.name must be a non-empty string")
-        run_name: str | None
-        if run_name_raw is None:
-            run_name = None
-        elif isinstance(run_name_raw, str) and run_name_raw.lower() == "auto":
-            run_name = None
-        elif isinstance(run_name_raw, str) and run_name_raw:
-            run_name = run_name_raw
-        else:
-            raise ValueError("project.run_name must be 'auto' or a non-empty string")
+        name: str = project_d["name"]
+        run_name = project_d.get("run_name")
 
         # --- Model ---
         model_d = d["model"]
