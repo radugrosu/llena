@@ -224,8 +224,21 @@ def load_ckpt(
         set_peft_model_state_dict(model.llm, ckpt["adapter"])
 
     if expected_stage is not None and stage != expected_stage:
-        typer.echo(f"ckpt: stage mismatch (ckpt_stage={stage} expected={expected_stage}); skipping optimizer")
-        step = 0
+        stage2 = {"peft_lora", "peft_qlora", "full_ft"}
+        if stage == "projector" and expected_stage in stage2:
+            typer.echo(
+                f"ckpt: stage transition (ckpt_stage={stage} -> expected={expected_stage}); "
+                "skipping optimizer"
+            )
+            step = 0
+        elif stage in stage2 and expected_stage in stage2:
+            typer.echo(
+                f"ckpt: stage transition (ckpt_stage={stage} -> expected={expected_stage}); "
+                "skipping optimizer (assume new stage2 data)"
+            )
+            step = 0
+        else:
+            raise ValueError(f"ckpt: stage mismatch (ckpt_stage={stage} expected={expected_stage})")
     elif "optimizer" in ckpt:
         optm.load_state_dict(ckpt["optimizer"])
 
@@ -235,7 +248,7 @@ def load_ckpt(
 
 def main(
     config: str = opt(..., "Path to YAML config"),
-    stage: Stage = opt("smoke", "Stage: smoke | projector | peft_lora | peft_qlora | full_ft"),
+    stage: Stage = opt("projector", "Stage: projector | peft_lora | peft_qlora | full_ft"),
     max_steps: int | None = opt(None, "Max training steps"),
     out_dir: str = opt("artifacts", "Base output directory for checkpoints/config"),
     resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
@@ -245,7 +258,7 @@ def main(
 ) -> None:
     load_dotenv()
     commit = get_git_commit()
-    if stage not in {"smoke", "projector", "peft_lora", "peft_qlora", "full_ft"}:
+    if stage not in {"projector", "peft_lora", "peft_qlora", "full_ft"}:
         raise ValueError(f"Unknown stage: {stage}")
 
     raw_cfg = load_config(config, overrides=override)
@@ -264,7 +277,7 @@ def main(
     save_resolved_config(raw_cfg, out_path / "resolved_config.yaml")
     set_seed(rc.train.seed)
 
-    freeze_llm = stage in {"smoke", "projector"}
+    freeze_llm = stage == "projector"
     peft_enable = stage in {"peft_lora", "peft_qlora"}
 
     mcfg = LlenaModelConfig(
@@ -286,7 +299,7 @@ def main(
 
     model = LlenaModel(mcfg)
 
-    if stage in {"smoke", "projector"}:
+    if stage == "projector":
         for name, p in model.named_parameters():
             p.requires_grad = name.startswith("projector.")
 

@@ -6,7 +6,7 @@ import re
 from typing import Literal, cast
 
 
-Stage = Literal["smoke", "projector", "peft_lora", "peft_qlora", "full_ft"]
+Stage = Literal["projector", "peft_lora", "peft_qlora", "full_ft"]
 DatasetName = Literal[
     "synthetic",
     "docvqa",

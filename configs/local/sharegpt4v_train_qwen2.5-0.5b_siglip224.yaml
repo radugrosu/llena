@@ -6,7 +6,7 @@ paths:
   cache_dir: ${HF_HOME:-.cache/huggingface}
 model:
   llm_name: Qwen/Qwen2.5-0.5B-Instruct
-  vision_name: google/siglip-base-patch16-224
+  vision_name: google/siglip-base-patch16-384
   llm_revision: null
   vision_revision: null
 mm:
@@ -22,10 +22,10 @@ train:
   lora_alpha: 32
   lora_dropout: 0.05
   lora_targets:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
   lr_lora: 0.0001
   lr_projector: 0.001
   weight_decay: 0.0
