@@ -258,7 +258,7 @@ def run_eval(
         raise ValueError("Checkpoint missing run_config; cannot run eval without config.")
     raw_cfg = _apply_overrides(raw_cfg, override)
     rc = RunConfig.from_dict(raw_cfg)
-    base_run_name = raw_cfg["project"]["run_name"]
+    base_run_name = raw_cfg["project"]["run_name"]  # pyright: ignore[reportIndexIssue]
     if not isinstance(base_run_name, str) or not base_run_name:
         raise ValueError("project.run_name must be a non-empty string in checkpoint config")
 

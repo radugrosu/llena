@@ -60,6 +60,19 @@ def _normalize_vision_token(vision_name: str) -> str:
     return token or "vision"
 
 
+def _derive_num_image_tokens(vision_name: str, image_size: int) -> int:
+    lower = vision_name.lower()
+    match = re.search(r"patch(\d+)", lower)
+    if match is None:
+        raise ValueError(f"Unsupported vision model (missing patch size): {vision_name}")
+    patch = int(match.group(1))
+    if image_size % patch != 0:
+        raise ValueError(
+            f"image_size must be divisible by patch size ({patch}) for {vision_name}, got {image_size}"
+        )
+    tokens = (image_size // patch) ** 2
+    return tokens
+
 def _compute_run_name(*, data: DataConfig, model: ModelConfig) -> str:
     split = data.split.lower()
     dataset = data.dataset
@@ -149,17 +162,6 @@ class RunConfig:
             vision_name=str(model_d["vision_name"]),
         )
 
-        # --- MM ---
-        mm_d = d["mm"]
-        projector = str(mm_d["projector"])
-        if projector != "mlp2":
-            raise ValueError(f"Only projector=mlp2 is supported, got: {projector}")
-
-        mm = MmConfig(
-            num_image_tokens=int(mm_d["num_image_tokens"]),
-            projector="mlp2",
-        )
-
         # --- Data ---
         data_d = d["data"]
         dataset = str(data_d["dataset"]).lower()
@@ -183,6 +185,18 @@ class RunConfig:
             split=split,
             num_samples=int(data_d["num_samples"]),
             image_size=int(data_d["image_size"]),
+        )
+
+        # --- MM ---
+        mm_d = d["mm"]
+        projector = str(mm_d["projector"])
+        if projector != "mlp2":
+            raise ValueError(f"Only projector=mlp2 is supported, got: {projector}")
+
+        num_image_tokens = _derive_num_image_tokens(model.vision_name, data.image_size)
+        mm = MmConfig(
+            num_image_tokens=num_image_tokens,
+            projector="mlp2",
         )
 
         # --- Paths ---

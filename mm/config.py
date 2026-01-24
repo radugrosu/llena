@@ -130,7 +130,6 @@ def load_config(
     required = [
         ("model", "llm_name"),
         ("model", "vision_name"),
-        ("mm", "num_image_tokens"),
         ("train", "max_seq_len"),
         ("data", "dataset"),
     ]

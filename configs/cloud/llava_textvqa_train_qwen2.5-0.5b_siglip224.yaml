@@ -10,7 +10,6 @@ model:
   llm_revision: null
   vision_revision: null
 mm:
-  num_image_tokens: 256
   projector: mlp2
 train:
   seed: 42
