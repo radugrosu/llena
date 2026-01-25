@@ -131,6 +131,8 @@ def load_config(
         ("model", "llm_name"),
         ("model", "vision_name"),
         ("train", "max_seq_len"),
+        ("train", "lr_schedule"),
+        ("train", "warmup_ratio"),
         ("data", "dataset"),
     ]
     for a, b in required:

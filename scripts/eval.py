@@ -62,7 +62,7 @@ def build_dataset(rc: RunConfig, *, max_samples: int | None) -> Dataset:
         num_samples = rc.data.num_samples if max_samples is None else max_samples
         return SyntheticVQADataset(
             num_samples=num_samples,
-            image_size=rc.data.image_size,
+            image_size=224,
             seed=rc.train.seed,
         )
     if rc.data.dataset in {"llava_instruct", "llava_textvqa"}:
@@ -93,7 +93,7 @@ def _load_ckpt_meta(path: str) -> dict[str, object]:
 def _detect_stage(path: str) -> Stage:
     ckpt = _load_ckpt_meta(path)
     stage = str(ckpt.get("stage", ""))
-    if stage in ("smoke", "projector", "peft_lora", "peft_qlora", "full_ft"):
+    if stage in ("projector", "peft_lora", "peft_qlora", "full_ft"):
         return stage
     else:
         raise ValueError(f"Checkpoint stage is unknown or missing: {stage!r}")
@@ -380,7 +380,7 @@ def run_eval(
 
 
 def main(
-    stage: str = opt("auto", "Stage: auto | smoke | projector | peft_lora | peft_qlora | full_ft"),
+    stage: str = opt("auto", "Stage: auto | projector | peft_lora | peft_qlora | full_ft"),
     ckpt: str = opt(..., "Path to a ckpt.pt or a step_* directory"),
     batch_size: int | None = opt(None, "Eval batch size (None = config)"),
     max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
@@ -394,7 +394,7 @@ def main(
     if stage == "auto":
         stage = _detect_stage(ckpt)
         typer.echo(f"eval: detected stage={stage}", err=True)
-    if stage not in {"smoke", "projector", "peft_lora", "peft_qlora", "full_ft"}:
+    if stage not in {"projector", "peft_lora", "peft_qlora", "full_ft"}:
         raise ValueError(f"Unknown stage: {stage}")
     if dataset is not None:
         override.append(f"data.dataset={dataset}")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def build_dataset(
     if rc.data.dataset == "synthetic":
         return SyntheticVQADataset(
             num_samples=cap or rc.data.num_samples,
-            image_size=rc.data.image_size,
+            image_size=224,
             seed=rc.train.seed,
         )
     if rc.data.dataset == "llava_instruct":
@@ -162,7 +163,7 @@ def _ckpt_cfg(model: LlenaModel) -> dict[str, object]:
 
 def save_ckpt(
     out_dir: Path,
-    step: int,
+    global_step: int,
     model: LlenaModel,
     optm: torch.optim.Optimizer,
     *,
@@ -172,12 +173,12 @@ def save_ckpt(
     wandb_project: str | None,
     run_config: dict[str, object],
 ) -> None:
-    save_path = out_dir / f"step_{step}"
+    save_path = out_dir / f"step_{global_step}"
     save_path.mkdir(parents=True, exist_ok=True)
 
     payload: dict[str, object] = {
         "stage": stage,
-        "step": step,
+        "step": global_step,
         "cfg": _ckpt_cfg(model),
         "optimizer": optm.state_dict(),
         "run_config": run_config,
@@ -226,10 +227,7 @@ def load_ckpt(
     if expected_stage is not None and stage != expected_stage:
         stage2 = {"peft_lora", "peft_qlora", "full_ft"}
         if stage == "projector" and expected_stage in stage2:
-            typer.echo(
-                f"ckpt: stage transition (ckpt_stage={stage} -> expected={expected_stage}); "
-                "skipping optimizer"
-            )
+            typer.echo(f"ckpt: stage transition (ckpt_stage={stage} -> expected={expected_stage}); skipping optimizer")
             step = 0
         elif stage in stage2 and expected_stage in stage2:
             typer.echo(
@@ -359,11 +357,28 @@ def main(
     lr = rc.train.lr_projector if stage == "projector" else rc.train.lr_lora
     optm = torch.optim.AdamW(trainable_params, lr=lr)
 
+    accum = rc.train.grad_accum_steps
+    warmup_ratio = rc.train.warmup_ratio
+    total_micro_steps = max_steps if max_steps is not None else (len(dl) * rc.train.epochs)
+    total_optim_steps = max(1, math.ceil(total_micro_steps / accum))
+    warmup_steps = int(total_optim_steps * warmup_ratio)
+
+    def lr_scale(step_idx: int) -> float:
+        if warmup_steps > 0 and step_idx < warmup_steps:
+            return float(step_idx + 1) / float(warmup_steps)
+        denom = max(1, total_optim_steps - warmup_steps)
+        progress = (step_idx - warmup_steps) / denom
+        progress = min(max(progress, 0.0), 1.0)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    if rc.train.lr_schedule != "cosine":
+        raise ValueError(f"Unsupported lr_schedule: {rc.train.lr_schedule}")
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optm, lr_scale)
+
     # bf16-only autocast on CUDA
     use_amp = device.type == "cuda"
     amp_dtype = torch.bfloat16
 
-    accum = rc.train.grad_accum_steps
     log_every = rc.train.log_every
     save_every_eff = save_every if save_every is not None else rc.train.save_every
     max_grad_norm = rc.train.max_grad_norm
@@ -383,6 +398,7 @@ def main(
         raise NotImplementedError("mlflow logging not implemented.")
 
     start_step = 0
+    global_step = 0
     if resume is not None:
         ckpt_path = Path(resume)
         if ckpt_path.is_dir():
@@ -391,94 +407,106 @@ def main(
             raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
         start_step, ckpt_stage = load_ckpt(ckpt_path, model, optm, device, expected_stage=stage)
         typer.echo(f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})")
+        if start_step > 0:
+            scheduler.last_epoch = start_step - 1
+            global_step = start_step
 
     model.train()
     optm.zero_grad(set_to_none=True)
 
-    step = start_step
+    step = start_step * accum
     last_loss = 0.0
     last_log_step = start_step
     last_log_time = time.perf_counter()
     last_log_tokens = 0
-    for batch in dl:
-        step += 1
-        batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
 
-        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            out = model(
-                pixel_values=batch_t["pixel_values"],
-                input_ids=batch_t["input_ids"],
-                mm_attention_mask=batch_t["mm_attention_mask"],
-                mm_labels=batch_t["mm_labels"],
-            )
-            loss = out.loss / accum
+    for epoch in range(rc.train.epochs):
+        for batch in dl:
+            step += 1
+            batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
 
-        loss.backward()
-
-        if step % accum == 0:
-            if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
-            optm.step()
-            optm.zero_grad(set_to_none=True)
-
-        if step % log_every == 0:
-            now = time.perf_counter()
-            steps_delta = step - last_log_step
-            dt = max(now - last_log_time, 1e-8)
-            tokens_in_batch = int(batch_t["mm_attention_mask"].sum().item())
-            last_log_tokens += tokens_in_batch
-            tokens_per_s = last_log_tokens / dt
-            samples_per_s = (rc.train.micro_batch_size * steps_delta) / dt if steps_delta > 0 else 0.0
-
-            last_loss = float(loss.item() * accum)
-            typer.echo(
-                f"stage={stage} step={step} loss={last_loss:.4f} samples/s={samples_per_s:.2f} tok/s={tokens_per_s:.0f}"
-            )
-            if rc.logging.backend == "wandb":
-                wandb.log(
-                    {
-                        "global_step": step,
-                        "train/loss": last_loss,
-                        "train/samples_per_s": samples_per_s,
-                        "train/tokens_per_s": tokens_per_s,
-                    }
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                out = model(
+                    pixel_values=batch_t["pixel_values"],
+                    input_ids=batch_t["input_ids"],
+                    mm_attention_mask=batch_t["mm_attention_mask"],
+                    mm_labels=batch_t["mm_labels"],
                 )
-            last_log_step = step
-            last_log_time = now
-            last_log_tokens = 0
+                loss = out.loss / accum
 
-        if eval_every > 0 and val_dl is not None and step % eval_every == 0:
-            typer.echo(f"val: starting eval at step={step}")
-            val_loss = eval_loop(
-                model,
-                val_dl,
-                device,
-                use_amp=use_amp,
-                amp_dtype=amp_dtype,
-            )
-            typer.echo(f"val: step={step} loss={val_loss:.4f}")
-            if rc.logging.backend == "wandb":
-                wandb.log({"global_step": step, "val/loss": val_loss})
+            loss.backward()
 
-        if save_every_eff > 0 and step % save_every_eff == 0:
-            save_ckpt(
-                out_path,
-                step,
-                model,
-                optm,
-                stage=stage,
-                save_trainable_only=save_trainable_only,
-                wandb_run_id=wandb_run_id,
-                wandb_project=wandb_project,
-                run_config=raw_cfg,
-            )
+            if step % accum == 0:
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+                optm.step()
+                scheduler.step()
+                optm.zero_grad(set_to_none=True)
+                global_step += 1
 
-        if max_steps and step >= max_steps:
+                if global_step % log_every == 0:
+                    now = time.perf_counter()
+                    steps_delta = global_step - last_log_step
+                    dt = max(now - last_log_time, 1e-8)
+                    tokens_in_batch = int(batch_t["mm_attention_mask"].sum().item())
+                    last_log_tokens += tokens_in_batch
+                    tokens_per_s = last_log_tokens / dt
+                    samples_per_s = (rc.train.micro_batch_size * accum * steps_delta) / dt if steps_delta > 0 else 0.0
+
+                    last_loss = float(loss.item() * accum)
+                    typer.echo(
+                        f"stage={stage} epoch={epoch + 1}/{rc.train.epochs} global_step={global_step} "
+                        f"loss={last_loss:.4f} samples/s={samples_per_s:.2f} tok/s={tokens_per_s:.0f}"
+                    )
+                    if rc.logging.backend == "wandb":
+                        wandb.log(
+                            {
+                                "global_step": global_step,
+                                "train/loss": last_loss,
+                                "train/samples_per_s": samples_per_s,
+                                "train/tokens_per_s": tokens_per_s,
+                                "train/lr": optm.param_groups[0]["lr"],
+                                "train/epoch": epoch + 1,
+                            }
+                        )
+                    last_log_step = global_step
+                    last_log_time = now
+                    last_log_tokens = 0
+
+                if eval_every > 0 and val_dl is not None and global_step % eval_every == 0:
+                    typer.echo(f"val: starting eval at global_step={global_step}")
+                    val_loss = eval_loop(
+                        model,
+                        val_dl,
+                        device,
+                        use_amp=use_amp,
+                        amp_dtype=amp_dtype,
+                    )
+                    typer.echo(f"val: global_step={global_step} loss={val_loss:.4f}")
+                    if rc.logging.backend == "wandb":
+                        wandb.log({"global_step": global_step, "val/loss": val_loss})
+
+                if save_every_eff > 0 and global_step % save_every_eff == 0:
+                    save_ckpt(
+                        out_path,
+                        global_step,
+                        model,
+                        optm,
+                        stage=stage,
+                        save_trainable_only=save_trainable_only,
+                        wandb_run_id=wandb_run_id,
+                        wandb_project=wandb_project,
+                        run_config=raw_cfg,
+                    )
+
+            if max_steps and global_step >= max_steps:
+                break
+        if max_steps and global_step >= max_steps:
             break
 
     save_ckpt(
         out_path,
-        step,
+        global_step,
         model,
         optm,
         stage=stage,
@@ -493,11 +521,12 @@ def main(
     report = {
         "stage": stage,
         "step": step,
+        "global_step": global_step,
         "loss": last_loss,
-        "ckpt_dir": str(out_path / f"step_{step}"),
+        "ckpt_dir": str(out_path / f"step_{global_step}"),
         "commit": commit,
     }
-    report_path = Path(rc.paths.reports_dir) / f"train_{rc.project.run_name}_step{step}_{stage}.json"
+    report_path = Path(rc.paths.reports_dir) / f"train_{rc.project.run_name}_step{global_step}_{stage}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, sort_keys=True)

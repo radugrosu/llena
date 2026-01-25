@@ -33,9 +33,11 @@ train:
   lr_projector: 2.0e-4
   weight_decay: 0.0
   warmup_ratio: 0.03
+  lr_schedule: cosine
   max_grad_norm: 1.0
 
   max_seq_len: 512
+  epochs: 1
   batch_size: 16
   micro_batch_size: 4
 
@@ -49,7 +51,6 @@ data:
   data_dir: "datasets/processed"
   split: "validation"
   num_samples: 0
-  image_size: 224
 
 logging:
   backend: "wandb"

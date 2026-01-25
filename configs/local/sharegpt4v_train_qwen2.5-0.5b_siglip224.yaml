@@ -30,8 +30,10 @@ train:
   lr_projector: 0.001
   weight_decay: 0.0
   warmup_ratio: 0.03
+  lr_schedule: cosine
   max_grad_norm: 0.0
   max_seq_len: 128
+  epochs: 1
   batch_size: 256
   micro_batch_size: 1
   log_every: 10
@@ -44,7 +46,6 @@ data:
   data_dir: datasets/processed
   split: train
   num_samples: 500
-  image_size: 224
 logging:
   backend: wandb
   wandb_project: llena

@@ -16,24 +16,26 @@ train:
   device: cuda
   precision: bf16
   gradient_checkpointing: true
-  use_lora: true
+  use_lora: false
   use_qlora: false
   lora_r: 16
   lora_alpha: 32
   lora_dropout: 0.05
   lora_targets:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
   lr_lora: 0.0001
   lr_projector: 0.001
   weight_decay: 0.0
   warmup_ratio: 0.03
+  lr_schedule: cosine
   max_grad_norm: 0.0
-  max_seq_len: 128
+  max_seq_len: 1024
+  epochs: 1
   batch_size: 256
-  micro_batch_size: 4
+  micro_batch_size: 32
   log_every: 10
   eval_every: 200
   save_every: 200
@@ -43,7 +45,6 @@ data:
   data_dir: datasets/processed
   split: train
   num_samples: 0
-  image_size: 224
 logging:
   backend: wandb
   wandb_project: llena

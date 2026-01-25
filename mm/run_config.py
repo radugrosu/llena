@@ -36,7 +36,6 @@ class DataConfig:
     data_dir: str
     split: str
     num_samples: int
-    image_size: int
 
 
 def _normalize_llm_token(llm_name: str) -> str:
@@ -58,6 +57,14 @@ def _normalize_vision_token(vision_name: str) -> str:
     token = lower.split("/")[-1]
     token = re.sub(r"[^a-z0-9.]+", "", token)
     return token or "vision"
+
+
+def _derive_image_size(vision_name: str) -> int:
+    lower = vision_name.lower()
+    match = re.search(r"(\d{3,4})(?=\D|$)", lower)
+    if match is None:
+        raise ValueError(f"Unsupported vision model (missing image size): {vision_name}")
+    return int(match.group(1))
 
 
 def _derive_num_image_tokens(vision_name: str, image_size: int) -> int:
@@ -90,6 +97,7 @@ class TrainConfig:
     micro_batch_size: int
     grad_accum_steps: int
     max_seq_len: int
+    epochs: int
 
     log_every: int
     save_every: int
@@ -102,6 +110,8 @@ class TrainConfig:
     # Learning rates
     lr_projector: float
     lr_lora: float
+    lr_schedule: Literal["cosine"]
+    warmup_ratio: float
 
     # LoRA config (Qwen2.5 targets)
     lora_r: int
@@ -184,7 +194,6 @@ class RunConfig:
             data_dir=data_dir,
             split=split,
             num_samples=int(data_d["num_samples"]),
-            image_size=int(data_d["image_size"]),
         )
 
         # --- MM ---
@@ -193,7 +202,8 @@ class RunConfig:
         if projector != "mlp2":
             raise ValueError(f"Only projector=mlp2 is supported, got: {projector}")
 
-        num_image_tokens = _derive_num_image_tokens(model.vision_name, data.image_size)
+        image_size = _derive_image_size(model.vision_name)
+        num_image_tokens = _derive_num_image_tokens(model.vision_name, image_size)
         mm = MmConfig(
             num_image_tokens=num_image_tokens,
             projector="mlp2",
@@ -232,6 +242,13 @@ class RunConfig:
             raise ValueError("train.batch_size must be divisible by train.micro_batch_size")
         grad_accum_steps = batch_size // micro_batch_size
 
+        lr_schedule = str(train_d.get("lr_schedule", "")).lower()
+        if lr_schedule != "cosine":
+            raise ValueError(f"train.lr_schedule must be 'cosine', got: {lr_schedule}")
+        warmup_ratio = float(train_d.get("warmup_ratio", 0.0))
+        if warmup_ratio < 0.0 or warmup_ratio > 1.0:
+            raise ValueError("train.warmup_ratio must be between 0 and 1")
+
         train = TrainConfig(
             seed=int(train_d["seed"]),
             device=device,  # type: ignore[arg-type]
@@ -239,6 +256,7 @@ class RunConfig:
             micro_batch_size=micro_batch_size,
             grad_accum_steps=grad_accum_steps,
             max_seq_len=int(train_d["max_seq_len"]),
+            epochs=int(train_d.get("epochs", 1)),
             log_every=int(train_d["log_every"]),
             save_every=int(train_d["save_every"]),
             eval_every=int(train_d.get("eval_every", 0)),
@@ -247,6 +265,8 @@ class RunConfig:
             gradient_checkpointing=bool(train_d["gradient_checkpointing"]),
             lr_projector=float(train_d["lr_projector"]),
             lr_lora=float(train_d["lr_lora"]),
+            lr_schedule="cosine",
+            warmup_ratio=warmup_ratio,
             lora_r=int(train_d["lora_r"]),
             lora_alpha=int(train_d["lora_alpha"]),
             lora_dropout=float(train_d["lora_dropout"]),
