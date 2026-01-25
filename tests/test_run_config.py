@@ -16,6 +16,10 @@ def _base_cfg() -> dict:
             "split": "train",
             "num_samples": 0,
         },
+        "eval": {
+            "mode": "teacher",
+            "batch_size": 4,
+        },
         "train": {
             "seed": 42,
             "device": "cpu",

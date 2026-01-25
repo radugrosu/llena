@@ -43,3 +43,6 @@ data:
 logging:
   backend: wandb
   wandb_project: llena
+eval:
+  mode: teacher
+  batch_size: 8

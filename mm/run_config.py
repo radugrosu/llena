@@ -139,9 +139,9 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class EvalConfig:
-    enabled: bool
     max_samples: int
     batch_size: int
+    mode: Literal["teacher", "generate"] | None
 
 
 @dataclass(frozen=True)
@@ -320,16 +320,25 @@ class RunConfig:
         # --- Eval ---
         eval_d = d.get("eval")
         if eval_d is None:
-            eval_cfg = EvalConfig(enabled=False, max_samples=0, batch_size=1)
+            eval_cfg = EvalConfig(max_samples=0, batch_size=1, mode=None)
         elif not isinstance(eval_d, dict):
-            raise ValueError("eval must be a dict with enabled, max_samples, batch_size")
+            raise ValueError("eval must be a dict with max_samples, batch_size, and optional mode")
         else:
             if "batch_size" not in eval_d:
                 raise ValueError("eval.batch_size is required")
+            mode_raw = eval_d.get("mode")
+            if mode_raw is None:
+                mode_val = None
+            elif not isinstance(mode_raw, str):
+                raise ValueError("eval.mode must be a string when set")
+            else:
+                mode_val = mode_raw.lower()
+                if mode_val not in {"teacher", "generate"}:
+                    raise ValueError("eval.mode must be teacher|generate")
             eval_cfg = EvalConfig(
-                enabled=bool(eval_d.get("enabled", True)),
                 max_samples=int(eval_d.get("max_samples", 0)),
                 batch_size=int(eval_d["batch_size"]),
+                mode=cast(Literal["teacher", "generate"] | None, mode_val),
             )
 
         if run_name is None:

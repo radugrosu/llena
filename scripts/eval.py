@@ -386,7 +386,7 @@ def run_eval(
     max_samples: int | None,
     override: list[str],
     log_every: int,
-    eval_mode: Literal["teacher", "generate"],
+    eval_mode: Literal["teacher", "generate"] | None,
 ) -> tuple[dict[str, float], str]:
     commit = get_git_commit()
     ckpt_meta = _load_ckpt_meta(ckpt)
@@ -445,7 +445,8 @@ def run_eval(
                 config=raw_cfg,
             )
             wandb.define_metric("global_step", hidden=True)
-            wandb.define_metric("eval/*", step_metric="global_step")
+            wandb.define_metric("eval_teacher/*", step_metric="global_step")
+            wandb.define_metric("eval_generate/*", step_metric="global_step")
     elif rc.logging.backend == "mlflow":
         raise NotImplementedError("mlflow logging not implemented.")
 
@@ -463,6 +464,9 @@ def run_eval(
 
     typer.echo(f"eval: building dataset split={rc.data.split} max_samples={max_samples}")
     ds = build_dataset(rc, max_samples=max_samples)
+
+    if eval_mode is None:
+        eval_mode = rc.eval.mode or "teacher"
 
     if eval_mode == "teacher":
         collator = LlenaCollator(
@@ -512,7 +516,8 @@ def run_eval(
         )
     ckpt_step = int(ckpt_meta["step"])  # pyright: ignore[reportArgumentType]
     if rc.logging.backend == "wandb" and run_id is not None:
-        payload = {f"eval/{k}": v for k, v in metrics.items() if k != "count"}
+        payload: dict[str, object] = {f"eval_{eval_mode}/{k}": v for k, v in metrics.items() if k != "count"}
+        payload["eval/mode"] = eval_mode
         if ckpt_step >= 0:
             payload["global_step"] = float(ckpt_step)
         wandb.log(payload)
@@ -546,7 +551,7 @@ def main(
     split: str | None = opt(None, "Override data.split for eval"),
     override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
     log_every: int = opt(100, "Log progress every N batches (0 disables)"),
-    eval_mode: Literal["teacher", "generate"] = opt("generate", "Eval mode: generate | teacher"),
+    eval_mode: Literal["teacher", "generate"] | None = opt(None, "Eval mode: generate | teacher (None = config)"),
 ) -> None:
     load_dotenv()
     typer.echo("eval: starting", err=True)
