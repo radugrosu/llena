@@ -247,7 +247,7 @@ def load_ckpt(
 def main(
     config: str = opt(..., "Path to YAML config"),
     stage: Stage = opt("projector", "Stage: projector | peft_lora | peft_qlora | full_ft"),
-    max_steps: int | None = opt(None, "Max training steps"),
+    max_steps: int | None = opt(None, "Max training steps (overrides config)"),
     out_dir: str = opt("artifacts", "Base output directory for checkpoints/config"),
     resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
     save_every: int | None = opt(None, "Override train.save_every (int). If None, use config."),
@@ -359,6 +359,8 @@ def main(
 
     accum = rc.train.grad_accum_steps
     warmup_ratio = rc.train.warmup_ratio
+    if max_steps is None:
+        max_steps = rc.train.max_steps
     total_micro_steps = max_steps if max_steps is not None else (len(dl) * rc.train.epochs)
     total_optim_steps = max(1, math.ceil(total_micro_steps / accum))
     warmup_steps = int(total_optim_steps * warmup_ratio)
@@ -499,9 +501,9 @@ def main(
                         run_config=raw_cfg,
                     )
 
-            if max_steps and global_step >= max_steps:
+            if max_steps is not None and global_step >= max_steps:
                 break
-        if max_steps and global_step >= max_steps:
+        if max_steps is not None and global_step >= max_steps:
             break
 
     save_ckpt(

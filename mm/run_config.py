@@ -98,6 +98,7 @@ class TrainConfig:
     grad_accum_steps: int
     max_seq_len: int
     epochs: int
+    max_steps: int | None
 
     log_every: int
     save_every: int
@@ -249,6 +250,9 @@ class RunConfig:
         if warmup_ratio < 0.0 or warmup_ratio > 1.0:
             raise ValueError("train.warmup_ratio must be between 0 and 1")
 
+        max_steps_raw = train_d.get("max_steps", None)
+        max_steps = int(max_steps_raw) if max_steps_raw is not None else None
+
         train = TrainConfig(
             seed=int(train_d["seed"]),
             device=device,  # type: ignore[arg-type]
@@ -257,6 +261,7 @@ class RunConfig:
             grad_accum_steps=grad_accum_steps,
             max_seq_len=int(train_d["max_seq_len"]),
             epochs=int(train_d.get("epochs", 1)),
+            max_steps=max_steps,
             log_every=int(train_d["log_every"]),
             save_every=int(train_d["save_every"]),
             eval_every=int(train_d.get("eval_every", 0)),

@@ -22,10 +22,10 @@ train:
   lora_alpha: 32
   lora_dropout: 0.05
   lora_targets:
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
   lr_lora: 0.0002
   lr_projector: 0.0002
   weight_decay: 0.0
@@ -34,13 +34,14 @@ train:
   max_grad_norm: 0.0
   max_seq_len: 512
   epochs: 1
-  batch_size: 128
+  batch_size: 32
   micro_batch_size: 1
-  log_every: 10
-  eval_every: 50
+  log_every: 1
+  eval_every: 5
+  save_every: 5
   eval_max_samples: 100
-  save_every: 50
   save_total_limit: 2
+  max_steps: 5
 data:
   dataset: llava_textvqa
   data_dir: datasets/processed

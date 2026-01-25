@@ -31,6 +31,7 @@ def _base_cfg() -> dict:
             "max_grad_norm": 1.0,
             "max_seq_len": 512,
             "epochs": 1,
+            "max_steps": 5,
             "batch_size": 2,
             "micro_batch_size": 1,
             "log_every": 10,
