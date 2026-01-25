@@ -249,7 +249,7 @@ class RunConfig:
                 raise ValueError("train.stage.params.lora_targets must be a list[str]")
 
             # keep it specific to Qwen2.5 names
-            allowed_targets = {"q_proj", "k_proj", "v_proj", "o_proj"}
+            allowed_targets = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
             for t in lora_targets_raw:
                 if t not in allowed_targets:
                     raise ValueError(f"Unsupported LoRA target module: {t}. Allowed: {sorted(allowed_targets)}")
