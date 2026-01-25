@@ -375,9 +375,11 @@ def main(
         raise ValueError(f"Unsupported lr_schedule: {rc.train.lr_schedule}")
     scheduler = torch.optim.lr_scheduler.LambdaLR(optm, lr_scale)
 
-    # bf16-only autocast on CUDA
-    use_amp = device.type == "cuda"
-    amp_dtype = torch.bfloat16
+    # autocast precision on CUDA
+    use_amp = device.type == "cuda" and rc.train.precision in {"bf16", "fp16"}
+    amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
+    use_scaler = rc.train.precision == "fp16"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
 
     log_every = rc.train.log_every
     save_every_eff = save_every if save_every is not None else rc.train.save_every
@@ -434,15 +436,21 @@ def main(
                 )
                 loss = out.loss / accum
 
-            loss.backward()
+            scaler.scale(loss).backward()
 
             last_log_tokens += int(batch_t["mm_attention_mask"].sum().item())
             last_log_samples += batch_t["mm_attention_mask"].size(0)
 
             if step % accum == 0:
                 if max_grad_norm > 0:
+                    if use_scaler:
+                        scaler.unscale_(optm)
                     torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
-                optm.step()
+                if use_scaler:
+                    scaler.step(optm)
+                    scaler.update()
+                else:
+                    optm.step()
                 scheduler.step()
                 optm.zero_grad(set_to_none=True)
                 global_step += 1
@@ -460,15 +468,16 @@ def main(
                     )
                     if rc.logging.backend == "wandb":
                         wandb.log(
-                            {
-                                "global_step": global_step,
-                                "train/loss": last_loss,
-                                "train/samples_per_s": samples_per_s,
-                                "train/tokens_per_s": tokens_per_s,
-                                "train/lr": optm.param_groups[0]["lr"],
-                                "train/epoch": epoch + 1,
-                            }
-                        )
+                        {
+                            "global_step": global_step,
+                            "train/loss": last_loss,
+                            "train/samples_per_s": samples_per_s,
+                            "train/tokens_per_s": tokens_per_s,
+                            "train/lr": optm.param_groups[0]["lr"],
+                            "train/epoch": epoch + 1,
+                            **({"train/scale": float(scaler.get_scale())} if use_scaler else {}),
+                        }
+                    )
                     last_log_time = now
                     last_log_tokens = 0
                     last_log_samples = 0

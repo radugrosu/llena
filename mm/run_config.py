@@ -91,6 +91,7 @@ def _compute_run_name(*, data: DataConfig, model: ModelConfig) -> str:
 class TrainConfig:
     seed: int
     device: Literal["auto", "cpu", "cuda"]
+    precision: Literal["bf16", "fp16", "fp32"]
 
     batch_size: int
     micro_batch_size: int
@@ -238,8 +239,9 @@ class RunConfig:
         if device not in {"auto", "cpu", "cuda"}:
             raise ValueError(f"train.device must be one of auto|cpu|cuda, got: {device}")
 
-        # bf16-only policy: we don't accept config precision knobs here.
-        # If you have 'precision' in yaml, we ignore it on purpose.
+        precision = str(train_d.get("precision", "bf16")).lower()
+        if precision not in {"bf16", "fp16", "fp32"}:
+            raise ValueError(f"train.precision must be bf16|fp16|fp32, got: {precision}")
         lora_targets_raw = stage_params.get("lora_targets")
         if stage_name in {"lora", "qlora"}:
             for key in ("lora_r", "lora_alpha", "lora_dropout"):
@@ -278,6 +280,7 @@ class RunConfig:
         train = TrainConfig(
             seed=int(train_d["seed"]),
             device=device,  # type: ignore[arg-type]
+            precision=cast(Literal["bf16", "fp16"], precision),
             batch_size=batch_size,
             micro_batch_size=micro_batch_size,
             grad_accum_steps=grad_accum_steps,

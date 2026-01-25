@@ -184,6 +184,9 @@ def eval_loop(
     device: torch.device,
     dataset: str,
     log_every: int,
+    *,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
 ) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -196,12 +199,13 @@ def eval_loop(
         for step, (batch, answers_list) in enumerate(dl, start=1):
             batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
 
-            out = model(
-                pixel_values=batch_t["pixel_values"],
-                input_ids=batch_t["input_ids"],
-                mm_attention_mask=batch_t["mm_attention_mask"],
-                mm_labels=batch_t["mm_labels"],
-            )
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                out = model(
+                    pixel_values=batch_t["pixel_values"],
+                    input_ids=batch_t["input_ids"],
+                    mm_attention_mask=batch_t["mm_attention_mask"],
+                    mm_labels=batch_t["mm_labels"],
+                )
             loss = float(out.loss)
             total_loss += loss * len(answers_list)
             total += len(answers_list)
@@ -310,6 +314,10 @@ def run_eval(
     elif rc.logging.backend == "mlflow":
         raise NotImplementedError("mlflow logging not implemented.")
 
+    # autocast precision on CUDA
+    use_amp = device.type == "cuda" and rc.train.precision in {"bf16", "fp16"}
+    amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
+
     typer.echo("eval: loading image processor")
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
     if batch_size is None:
@@ -350,7 +358,15 @@ def run_eval(
     )
 
     typer.echo("eval: starting eval loop")
-    metrics = eval_loop(model, dl, device, rc.data.dataset, log_every)
+    metrics = eval_loop(
+        model,
+        dl,
+        device,
+        rc.data.dataset,
+        log_every,
+        use_amp=use_amp,
+        amp_dtype=amp_dtype,
+    )
     if rc.logging.backend == "wandb" and run_id is not None:
         payload = {f"eval/{k}": v for k, v in metrics.items() if k != "count"}
         ckpt_step = _detect_step(ckpt)
