@@ -93,7 +93,7 @@ def _load_ckpt_meta(path: str) -> dict[str, object]:
 def _detect_stage(path: str) -> Stage:
     ckpt = _load_ckpt_meta(path)
     stage = str(ckpt.get("stage", ""))
-    if stage in ("projector", "peft_lora", "peft_qlora", "full_ft"):
+    if stage in ("projector", "lora", "qlora", "full_ft"):
         return stage
     else:
         raise ValueError(f"Checkpoint stage is unknown or missing: {stage!r}")
@@ -262,7 +262,7 @@ def run_eval(
     if not isinstance(base_run_name, str) or not base_run_name:
         raise ValueError("project.run_name must be a non-empty string in checkpoint config")
 
-    qlora_enable = stage == "peft_qlora"
+    qlora_enable = stage == "qlora"
     device = get_device(rc.train.device, force_cuda=qlora_enable)
 
     mcfg = LlenaModelConfig(
@@ -273,11 +273,11 @@ def run_eval(
         gradient_checkpointing=False,
         freeze_vision=True,
         freeze_llm=True,
-        peft_enable=stage in {"peft_lora", "peft_qlora"},
-        peft_r=rc.train.lora_r,
-        peft_alpha=rc.train.lora_alpha,
-        peft_dropout=rc.train.lora_dropout,
-        peft_target_modules=list(rc.train.lora_targets),
+        peft_enable=stage in {"lora", "qlora"},
+        peft_r=rc.train.lora_r or 0,
+        peft_alpha=rc.train.lora_alpha or 0,
+        peft_dropout=rc.train.lora_dropout or 0.0,
+        peft_target_modules=list(rc.train.lora_targets or ()),
         qlora_enable=qlora_enable,
         device="cuda" if device.type == "cuda" else "cpu",
     )
@@ -381,7 +381,7 @@ def run_eval(
 
 
 def main(
-    stage: str = opt("auto", "Stage: auto | projector | peft_lora | peft_qlora | full_ft"),
+    stage: str = opt("auto", "Stage: auto | projector | lora | qlora | full_ft"),
     ckpt: str = opt(..., "Path to a ckpt.pt or a step_* directory"),
     batch_size: int | None = opt(None, "Eval batch size (None = config)"),
     max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
@@ -395,7 +395,7 @@ def main(
     if stage == "auto":
         stage = _detect_stage(ckpt)
         typer.echo(f"eval: detected stage={stage}", err=True)
-    if stage not in {"projector", "peft_lora", "peft_qlora", "full_ft"}:
+    if stage not in {"projector", "lora", "qlora", "full_ft"}:
         raise ValueError(f"Unknown stage: {stage}")
     if dataset is not None:
         override.append(f"data.dataset={dataset}")

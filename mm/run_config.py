@@ -6,7 +6,7 @@ import re
 from typing import Literal, cast
 
 
-Stage = Literal["projector", "peft_lora", "peft_qlora", "full_ft"]
+Stage = Literal["projector", "lora", "qlora", "full_ft"]
 DatasetName = Literal[
     "synthetic",
     "docvqa",
@@ -74,11 +74,10 @@ def _derive_num_image_tokens(vision_name: str, image_size: int) -> int:
         raise ValueError(f"Unsupported vision model (missing patch size): {vision_name}")
     patch = int(match.group(1))
     if image_size % patch != 0:
-        raise ValueError(
-            f"image_size must be divisible by patch size ({patch}) for {vision_name}, got {image_size}"
-        )
+        raise ValueError(f"image_size must be divisible by patch size ({patch}) for {vision_name}, got {image_size}")
     tokens = (image_size // patch) ** 2
     return tokens
+
 
 def _compute_run_name(*, data: DataConfig, model: ModelConfig) -> str:
     split = data.split.lower()
@@ -108,17 +107,15 @@ class TrainConfig:
 
     gradient_checkpointing: bool
 
-    # Learning rates
-    lr_projector: float
-    lr_lora: float
+    lr: float
     lr_schedule: Literal["cosine"]
     warmup_ratio: float
 
-    # LoRA config (Qwen2.5 targets)
-    lora_r: int
-    lora_alpha: int
-    lora_dropout: float
-    lora_targets: tuple[str, ...]
+    stage_name: Stage
+    lora_r: int | None
+    lora_alpha: int | None
+    lora_dropout: float | None
+    lora_targets: tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -219,21 +216,46 @@ class RunConfig:
 
         # --- Train ---
         train_d = d["train"]
+        stage_d = train_d.get("stage")
+        if not isinstance(stage_d, dict):
+            raise ValueError("train.stage must be a dict with name and optional params")
+        stage_name_raw = stage_d.get("name")
+        if not isinstance(stage_name_raw, str):
+            raise ValueError("train.stage.name must be a string")
+        stage_name_raw = stage_name_raw.lower()
+        if stage_name_raw == "lora":
+            stage_name = "lora"
+        elif stage_name_raw == "qlora":
+            stage_name = "qlora"
+        elif stage_name_raw in {"projector", "full_ft"}:
+            stage_name = cast(Stage, stage_name_raw)
+        else:
+            raise ValueError(f"train.stage.name must be projector|lora|qlora|full_ft, got: {stage_name_raw}")
+        stage_params = stage_d.get("params") or {}
+        if not isinstance(stage_params, dict):
+            raise ValueError("train.stage.params must be a dict")
         device = str(train_d.get("device", "auto")).lower()
         if device not in {"auto", "cpu", "cuda"}:
             raise ValueError(f"train.device must be one of auto|cpu|cuda, got: {device}")
 
         # bf16-only policy: we don't accept config precision knobs here.
         # If you have 'precision' in yaml, we ignore it on purpose.
-        lora_targets_raw = train_d["lora_targets"]
-        if not isinstance(lora_targets_raw, list) or not all(isinstance(x, str) for x in lora_targets_raw):
-            raise ValueError("train.lora_targets must be a list[str]")
+        lora_targets_raw = stage_params.get("lora_targets")
+        if stage_name in {"lora", "qlora"}:
+            for key in ("lora_r", "lora_alpha", "lora_dropout"):
+                if key not in stage_params:
+                    raise ValueError(f"train.stage.params.{key} is required for stage={stage_name}")
+            if not isinstance(lora_targets_raw, list) or not all(isinstance(x, str) for x in lora_targets_raw):
+                raise ValueError("train.stage.params.lora_targets must be a list[str]")
 
-        # keep it specific to Qwen2.5 names
-        allowed_targets = {"q_proj", "k_proj", "v_proj", "o_proj"}
-        for t in lora_targets_raw:
-            if t not in allowed_targets:
-                raise ValueError(f"Unsupported LoRA target module: {t}. Allowed: {sorted(allowed_targets)}")
+            # keep it specific to Qwen2.5 names
+            allowed_targets = {"q_proj", "k_proj", "v_proj", "o_proj"}
+            for t in lora_targets_raw:
+                if t not in allowed_targets:
+                    raise ValueError(f"Unsupported LoRA target module: {t}. Allowed: {sorted(allowed_targets)}")
+        else:
+            if stage_params:
+                raise ValueError("train.stage.params must be empty for non-PEFT stages")
 
         batch_size = int(train_d["batch_size"])
         micro_batch_size = int(train_d["micro_batch_size"])
@@ -268,14 +290,14 @@ class RunConfig:
             eval_max_samples=int(train_d.get("eval_max_samples", 0)),
             max_grad_norm=float(train_d["max_grad_norm"]),
             gradient_checkpointing=bool(train_d["gradient_checkpointing"]),
-            lr_projector=float(train_d["lr_projector"]),
-            lr_lora=float(train_d["lr_lora"]),
+            lr=float(train_d["lr"]),
             lr_schedule="cosine",
             warmup_ratio=warmup_ratio,
-            lora_r=int(train_d["lora_r"]),
-            lora_alpha=int(train_d["lora_alpha"]),
-            lora_dropout=float(train_d["lora_dropout"]),
-            lora_targets=tuple(lora_targets_raw),
+            stage_name=cast(Stage, stage_name),
+            lora_r=int(stage_params["lora_r"]) if "lora_r" in stage_params else None,
+            lora_alpha=int(stage_params["lora_alpha"]) if "lora_alpha" in stage_params else None,
+            lora_dropout=float(stage_params["lora_dropout"]) if "lora_dropout" in stage_params else None,
+            lora_targets=tuple(lora_targets_raw) if isinstance(lora_targets_raw, list) else None,
         )
 
         # --- Logging ---

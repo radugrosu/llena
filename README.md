@@ -12,7 +12,7 @@ Key goals:
 
 ```bash
 uv sync
-uv run python -m scripts.train --config configs/local/textvqa_train.yaml --stage projector --max-steps 50
+uv run python -m scripts.train --config configs/local/textvqa_train.yaml --max-steps 50
 uv run python -m scripts.eval --ckpt artifacts/<run>/step_100 --override data.split=validation
 ```
 
@@ -70,8 +70,8 @@ Both ShareGPT4V-COCO and LLaVA-Instruct download/process scripts use this shared
 Stage‑driven runs:
 
 ```bash
-uv run python -m scripts.train --config configs/cloud/textvqa_train.yaml --stage projector --max-steps 1000
-uv run python -m scripts.train --config configs/cloud/textvqa_train.yaml --stage peft_lora --max-steps 1000
+uv run python -m scripts.train --config configs/cloud/textvqa_train.yaml --max-steps 1000
+uv run python -m scripts.train --config configs/cloud/textvqa_train.yaml --max-steps 1000
 ```
 
 ## Evaluation

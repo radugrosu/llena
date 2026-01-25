@@ -188,7 +188,7 @@ def save_ckpt(
     if wandb_project is not None:
         payload["wandb_project"] = wandb_project
 
-    if save_trainable_only and stage in {"projector", "peft_lora", "peft_qlora"}:
+    if save_trainable_only and stage in {"projector", "lora", "qlora"}:
         payload["projector"] = model.projector.state_dict()
         if model.cfg.peft_enable:
             if not isinstance(model.llm, PeftModel):
@@ -225,7 +225,7 @@ def load_ckpt(
         set_peft_model_state_dict(model.llm, ckpt["adapter"])
 
     if expected_stage is not None and stage != expected_stage:
-        stage2 = {"peft_lora", "peft_qlora", "full_ft"}
+        stage2 = {"lora", "qlora", "full_ft"}
         if stage == "projector" and expected_stage in stage2:
             typer.echo(f"ckpt: stage transition (ckpt_stage={stage} -> expected={expected_stage}); skipping optimizer")
             step = 0
@@ -246,7 +246,6 @@ def load_ckpt(
 
 def main(
     config: str = opt(..., "Path to YAML config"),
-    stage: Stage = opt("projector", "Stage: projector | peft_lora | peft_qlora | full_ft"),
     max_steps: int | None = opt(None, "Max training steps (overrides config)"),
     out_dir: str = opt("artifacts", "Base output directory for checkpoints/config"),
     resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
@@ -256,14 +255,13 @@ def main(
 ) -> None:
     load_dotenv()
     commit = get_git_commit()
-    if stage not in {"projector", "peft_lora", "peft_qlora", "full_ft"}:
-        raise ValueError(f"Unknown stage: {stage}")
-
     raw_cfg = load_config(config, overrides=override)
     rc = RunConfig.from_dict(raw_cfg)
     raw_cfg["project"]["run_name"] = rc.project.run_name  # pyright: ignore[reportIndexIssue]
 
-    qlora_enable = stage == "peft_qlora"
+    stage = rc.train.stage_name
+
+    qlora_enable = stage == "qlora"
     device = get_device(rc.train.device, force_cuda=qlora_enable)
 
     run_stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -276,7 +274,7 @@ def main(
     set_seed(rc.train.seed)
 
     freeze_llm = stage == "projector"
-    peft_enable = stage in {"peft_lora", "peft_qlora"}
+    peft_enable = stage in {"lora", "qlora"}
 
     mcfg = LlenaModelConfig(
         llm_name=rc.model.llm_name,
@@ -287,10 +285,10 @@ def main(
         freeze_vision=True,
         freeze_llm=freeze_llm,
         peft_enable=peft_enable,
-        peft_r=rc.train.lora_r,
-        peft_alpha=rc.train.lora_alpha,
-        peft_dropout=rc.train.lora_dropout,
-        peft_target_modules=list(rc.train.lora_targets),
+        peft_r=rc.train.lora_r or 0,
+        peft_alpha=rc.train.lora_alpha or 0,
+        peft_dropout=rc.train.lora_dropout or 0.0,
+        peft_target_modules=list(rc.train.lora_targets or ()),
         qlora_enable=qlora_enable,
         device="cuda" if device.type == "cuda" else "cpu",
     )
@@ -354,7 +352,7 @@ def main(
     if not trainable_params:
         raise RuntimeError("No trainable parameters. Check freezing logic/PEFT wiring.")
 
-    lr = rc.train.lr_projector if stage == "projector" else rc.train.lr_lora
+    lr = rc.train.lr
     optm = torch.optim.AdamW(trainable_params, lr=lr)
 
     accum = rc.train.grad_accum_steps

@@ -18,16 +18,6 @@ train:
   gradient_checkpointing: false
   use_lora: true
   use_qlora: false
-  lora_r: 16
-  lora_alpha: 32
-  lora_dropout: 0.05
-  lora_targets:
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
-  lr_lora: 0.0002
-  lr_projector: 0.0002
   weight_decay: 0.0
   warmup_ratio: 0.03
   lr_schedule: cosine
@@ -42,6 +32,18 @@ train:
   eval_max_samples: 10
   save_total_limit: 2
   max_steps: 5
+  stage:
+    name: lora
+    params:
+      lora_r: 16
+      lora_alpha: 32
+      lora_dropout: 0.05
+      lora_targets:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+  lr: 0.0002
 data:
   dataset: llava_textvqa
   data_dir: datasets/processed

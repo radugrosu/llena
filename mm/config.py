@@ -65,7 +65,7 @@ def _deep_merge(
 
 def _set_dotted_key(cfg: dict[str, object], dotted_key: str, raw_value: str) -> None:
     """
-    Set nested keys like "train.lr_lora=1e-4" into cfg.
+    Set nested keys like "train.lr=1e-4" into cfg.
 
     Attempts type coercion:
       - "true"/"false" -> bool
@@ -98,7 +98,7 @@ def load_config(
       base_config: "configs/base.yaml"
 
     Apply environment variable expansion and dotted-key CLI overrides:
-      overrides=["train.lr_lora=5e-5", "mm.num_image_tokens=128"]
+      overrides=["train.lr=5e-5", "mm.num_image_tokens=128"]
     """
     config_path = Path(config_path)
     with config_path.open("r", encoding="utf-8") as f:
@@ -133,6 +133,8 @@ def load_config(
         ("train", "max_seq_len"),
         ("train", "lr_schedule"),
         ("train", "warmup_ratio"),
+        ("train", "lr"),
+        ("train", "stage"),
         ("data", "dataset"),
     ]
     for a, b in required:

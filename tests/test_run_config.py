@@ -20,14 +20,8 @@ def _base_cfg() -> dict:
             "seed": 42,
             "device": "cpu",
             "gradient_checkpointing": False,
-            "lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj"],
-            "lr_lora": 1.0e-4,
-            "lr_projector": 2.0e-4,
             "lr_schedule": "cosine",
             "warmup_ratio": 0.03,
-            "lora_r": 16,
-            "lora_alpha": 32,
-            "lora_dropout": 0.05,
             "max_grad_norm": 1.0,
             "max_seq_len": 512,
             "epochs": 1,
@@ -38,6 +32,16 @@ def _base_cfg() -> dict:
             "save_every": 0,
             "eval_every": 0,
             "eval_max_samples": 0,
+            "lr": 1.0e-4,
+            "stage": {
+                "name": "lora",
+                "params": {
+                    "lora_r": 16,
+                    "lora_alpha": 32,
+                    "lora_dropout": 0.05,
+                    "lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj"],
+                },
+            },
         },
     }
 
