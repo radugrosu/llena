@@ -418,9 +418,9 @@ def main(
 
     step = start_step * accum
     last_loss = 0.0
-    last_log_step = start_step
     last_log_time = time.perf_counter()
     last_log_tokens = 0
+    last_log_samples = 0
 
     for epoch in range(rc.train.epochs):
         for batch in dl:
@@ -438,6 +438,9 @@ def main(
 
             loss.backward()
 
+            last_log_tokens += int(batch_t["mm_attention_mask"].sum().item())
+            last_log_samples += batch_t["mm_attention_mask"].size(0)
+
             if step % accum == 0:
                 if max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
@@ -448,12 +451,9 @@ def main(
 
                 if global_step % log_every == 0:
                     now = time.perf_counter()
-                    steps_delta = global_step - last_log_step
                     dt = max(now - last_log_time, 1e-8)
-                    tokens_in_batch = int(batch_t["mm_attention_mask"].sum().item())
-                    last_log_tokens += tokens_in_batch
                     tokens_per_s = last_log_tokens / dt
-                    samples_per_s = (rc.train.micro_batch_size * accum * steps_delta) / dt if steps_delta > 0 else 0.0
+                    samples_per_s = last_log_samples / dt
 
                     last_loss = float(loss.item() * accum)
                     typer.echo(
@@ -471,9 +471,9 @@ def main(
                                 "train/epoch": epoch + 1,
                             }
                         )
-                    last_log_step = global_step
                     last_log_time = now
                     last_log_tokens = 0
+                    last_log_samples = 0
 
                 if eval_every > 0 and val_dl is not None and global_step % eval_every == 0:
                     typer.echo(f"val: starting eval at global_step={global_step}")

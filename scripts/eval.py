@@ -315,7 +315,8 @@ def run_eval(
     if batch_size is None:
         batch_size = rc.eval.batch_size
     if max_samples is None:
-        max_samples = rc.eval.max_samples
+        max_samples = rc.train.eval_max_samples if rc.train.eval_max_samples > 0 else rc.eval.max_samples
+        typer.echo(f"eval: max_samples from config = {max_samples}")
 
     typer.echo(f"eval: building dataset split={rc.data.split} max_samples={max_samples}")
     ds = build_dataset(rc, max_samples=max_samples)
