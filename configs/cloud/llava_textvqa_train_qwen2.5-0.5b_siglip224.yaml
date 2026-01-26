@@ -16,8 +16,6 @@ train:
   device: cuda
   precision: bf16
   gradient_checkpointing: true
-  use_lora: true
-  use_qlora: false
   weight_decay: 0.0
   warmup_ratio: 0.03
   lr_schedule: cosine
@@ -34,8 +32,8 @@ train:
   stage:
     name: lora
     params:
-      lora_r: 16
-      lora_alpha: 32
+      lora_r: 128
+      lora_alpha: 256
       lora_dropout: 0.05
       lora_targets:
         - q_proj

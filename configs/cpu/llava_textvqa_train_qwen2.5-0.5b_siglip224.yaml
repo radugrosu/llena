@@ -16,8 +16,6 @@ train:
   device: cpu
   precision: bf16
   gradient_checkpointing: false
-  use_lora: true
-  use_qlora: false
   weight_decay: 0.0
   warmup_ratio: 0.03
   lr_schedule: cosine
@@ -39,13 +37,13 @@ train:
       lora_alpha: 32
       lora_dropout: 0.05
       lora_targets:
-        - q_proj
-        - k_proj
-        - v_proj
-        - o_proj
-        - gate_proj
-        - up_proj
-        - down_proj
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
   lr: 0.0002
 data:
   dataset: llava_textvqa

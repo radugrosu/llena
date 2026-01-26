@@ -13,22 +13,23 @@ mm:
   projector: mlp2
 train:
   seed: 42
-  device: cuda
+  device: cpu
   precision: bf16
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   weight_decay: 0.0
   warmup_ratio: 0.03
   lr_schedule: cosine
   max_grad_norm: 0.0
-  max_seq_len: 1024
+  max_seq_len: 128
   epochs: 1
-  batch_size: 256
-  micro_batch_size: 32
-  log_every: 10
-  eval_every: 50
-  save_every: 50
+  batch_size: 16
+  micro_batch_size: 1
+  log_every: 1
+  eval_max_samples: 10
+  eval_every: 5
+  save_every: 5
   save_total_limit: 2
-  max_steps: null
+  max_steps: 5
   stage:
     name: projector
   lr: 0.001
@@ -36,10 +37,10 @@ data:
   dataset: sharegpt4v_coco
   data_dir: datasets/processed
   split: train
-  num_samples: 0
+  num_samples: 500
 logging:
   backend: wandb
   wandb_project: llena
 eval:
   mode: teacher
-  batch_size: 64
+  batch_size: 8

@@ -14,12 +14,12 @@ mm:
 train:
   seed: 42
   device: cuda
-  precision: bf16
+  precision: fp16
   gradient_checkpointing: true
   weight_decay: 0.0
   warmup_ratio: 0.03
   lr_schedule: cosine
-  max_grad_norm: 0.0
+  max_grad_norm: 0.5
   max_seq_len: 1024
   epochs: 1
   batch_size: 256

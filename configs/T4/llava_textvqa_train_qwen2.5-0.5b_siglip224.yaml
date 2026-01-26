@@ -14,26 +14,38 @@ mm:
 train:
   seed: 42
   device: cuda
-  precision: bf16
+  precision: fp16
   gradient_checkpointing: true
   weight_decay: 0.0
   warmup_ratio: 0.03
   lr_schedule: cosine
-  max_grad_norm: 0.0
-  max_seq_len: 1024
+  max_grad_norm: 0.5
+  max_seq_len: 1536
   epochs: 1
-  batch_size: 256
-  micro_batch_size: 32
+  batch_size: 128
+  micro_batch_size: 16
   log_every: 10
-  eval_every: 50
-  save_every: 50
-  save_total_limit: 2
+  eval_every: 200
+  save_every: 200
+  save_total_limit: 3
   max_steps: null
   stage:
-    name: projector
-  lr: 0.001
+    name: lora
+    params:
+      lora_r: 128
+      lora_alpha: 256
+      lora_dropout: 0.05
+      lora_targets:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+  lr: 0.0002
 data:
-  dataset: sharegpt4v_coco
+  dataset: llava_textvqa
   data_dir: datasets/processed
   split: train
   num_samples: 0
@@ -42,4 +54,4 @@ logging:
   wandb_project: llena
 eval:
   mode: teacher
-  batch_size: 64
+  batch_size: 32
