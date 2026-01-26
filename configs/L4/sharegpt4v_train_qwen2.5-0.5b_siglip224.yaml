@@ -9,6 +9,7 @@ model:
   vision_name: google/siglip-base-patch16-384
   llm_revision: null
   vision_revision: null
+  attn_implementation: flash_attention_2
 mm:
   projector: mlp2
 train:

@@ -22,6 +22,7 @@ LogBackend = Literal["none", "wandb", "mlflow"]
 class ModelConfig:
     llm_name: str
     vision_name: str
+    attn_implementation: str | None
 
 
 @dataclass(frozen=True)
@@ -166,9 +167,11 @@ class RunConfig:
 
         # --- Model ---
         model_d = d["model"]
+        attn_impl = model_d.get("attn_implementation")
         model = ModelConfig(
             llm_name=str(model_d["llm_name"]),
             vision_name=str(model_d["vision_name"]),
+            attn_implementation=str(attn_impl) if attn_impl is not None else None,
         )
 
         # --- Data ---

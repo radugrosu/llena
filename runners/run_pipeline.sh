@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CFG_PROFILE="${1:-cloud}"
+CFG_PROFILE="${1:-T4}"
 STAGE1_CFG="${STAGE1_CFG:-configs/${CFG_PROFILE}/sharegpt4v_train_qwen2.5-0.5b_siglip224.yaml}"
 STAGE2_CFG="${STAGE2_CFG:-configs/${CFG_PROFILE}/llava_textvqa_train_qwen2.5-0.5b_siglip224.yaml}"
 

@@ -32,19 +32,16 @@ class LlenaModelConfig:
     vision_name: str
     num_image_tokens: int
     projector: Literal["mlp2"]
-
     device: Literal["cpu", "cuda"]
     gradient_checkpointing: bool
-
+    attn_implementation: str | None = None
     freeze_vision: bool = True
     freeze_llm: bool = False
-
     peft_enable: bool = False
     peft_r: int = 16
     peft_alpha: int = 32
     peft_dropout: float = 0.05
     peft_target_modules: list[str] | None = None
-
     qlora_enable: bool = False
 
 
@@ -70,7 +67,10 @@ class LlenaModel(nn.Module):
             cfg.peft_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.llm_name)
-        self.vision = SiglipVisionModel.from_pretrained(cfg.vision_name)
+        self.vision = SiglipVisionModel.from_pretrained(
+            cfg.vision_name,
+            attn_implementation=cfg.attn_implementation,
+        )
 
         if cfg.qlora_enable:
             if cfg.device != "cuda":
@@ -88,6 +88,7 @@ class LlenaModel(nn.Module):
                 cfg.llm_name,
                 quantization_config=bnb,
                 device_map={"": 0},
+                attn_implementation=cfg.attn_implementation,
             )
             llm = prepare_model_for_kbit_training(
                 llm,
@@ -97,7 +98,11 @@ class LlenaModel(nn.Module):
         else:
             # Deterministic dtype: bf16 only on CUDA, fp32 on CPU (for tests)
             llm_dtype = torch.bfloat16 if cfg.device == "cuda" else torch.float32
-            llm = Qwen2ForCausalLM.from_pretrained(cfg.llm_name, dtype=llm_dtype)
+            llm = Qwen2ForCausalLM.from_pretrained(
+                cfg.llm_name,
+                dtype=llm_dtype,
+                attn_implementation=cfg.attn_implementation,
+            )
             if cfg.gradient_checkpointing:
                 llm.gradient_checkpointing_enable()
                 llm.config.use_cache = False
@@ -120,9 +125,7 @@ class LlenaModel(nn.Module):
         # Projector: match dtype to LLM embedding weights
         vision_dim = int(self.vision.config.hidden_size)
         llm_dim = int(self.llm.config.hidden_size)  # pyright: ignore[reportArgumentType, reportAttributeAccessIssue]
-        self.projector = build_projector(
-            cfg.projector, vision_dim=vision_dim, text_dim=llm_dim
-        )
+        self.projector = build_projector(cfg.projector, vision_dim=vision_dim, text_dim=llm_dim)
 
         self.num_image_tokens = int(cfg.num_image_tokens)
 
@@ -138,10 +141,7 @@ class LlenaModel(nn.Module):
                 p.requires_grad = False
             self.llm.eval()
 
-        if (
-            self.tokenizer.pad_token_id is None
-            and self.tokenizer.eos_token_id is not None
-        ):
+        if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Ensure projector dtype matches LLM embed dtype (important!)
