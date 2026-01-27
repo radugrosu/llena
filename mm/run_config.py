@@ -36,7 +36,7 @@ class DataConfig:
     dataset: DatasetName
     data_dir: str
     split: str
-    num_samples: int
+    num_samples: int | None
 
 
 def _normalize_llm_token(llm_name: str) -> str:
@@ -191,11 +191,19 @@ class RunConfig:
             )
         data_dir = str(data_d.get("data_dir", "datasets/processed"))
         split = str(data_d.get("split", "train"))
+        num_samples_val = data_d.get("num_samples")
+        num_samples: int | None
+        if num_samples_val is None:
+            num_samples = None
+        else:
+            num_samples = int(num_samples_val)
+            if num_samples <= 0:
+                num_samples = None
         data = DataConfig(
             dataset=cast(DatasetName, dataset),
             data_dir=data_dir,
             split=split,
-            num_samples=int(data_d["num_samples"]),
+            num_samples=num_samples,
         )
 
         # --- MM ---

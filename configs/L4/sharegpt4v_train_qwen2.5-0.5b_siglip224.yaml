@@ -24,7 +24,7 @@ train:
   max_seq_len: 1024
   epochs: 1
   batch_size: 256
-  micro_batch_size: 32
+  micro_batch_size: 4
   log_every: 10
   eval_every: 50
   save_every: 50
@@ -37,10 +37,9 @@ data:
   dataset: sharegpt4v_coco
   data_dir: datasets/processed
   split: train
-  num_samples: 0
 logging:
   backend: wandb
   wandb_project: llena
 eval:
   mode: teacher
-  batch_size: 64
+  batch_size: 4

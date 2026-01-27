@@ -14,7 +14,6 @@ def _base_cfg() -> dict:
             "dataset": "textvqa",
             "data_dir": "datasets/processed",
             "split": "train",
-            "num_samples": 0,
         },
         "eval": {
             "mode": "teacher",

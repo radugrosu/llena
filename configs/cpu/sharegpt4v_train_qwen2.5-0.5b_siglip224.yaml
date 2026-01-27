@@ -22,7 +22,7 @@ train:
   max_grad_norm: 0.0
   max_seq_len: 128
   epochs: 1
-  batch_size: 16
+  batch_size: 4
   micro_batch_size: 1
   log_every: 1
   eval_max_samples: 10

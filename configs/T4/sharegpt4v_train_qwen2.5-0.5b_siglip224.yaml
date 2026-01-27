@@ -36,7 +36,6 @@ data:
   dataset: sharegpt4v_coco
   data_dir: datasets/processed
   split: train
-  num_samples: 0
 logging:
   backend: wandb
   wandb_project: llena

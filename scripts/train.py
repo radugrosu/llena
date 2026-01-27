@@ -55,10 +55,12 @@ def build_dataset(
     max_samples: int | None = None,
 ) -> Dataset:
     use_split = split or rc.data.split
-    cap = max_samples if max_samples is not None else (rc.data.num_samples if rc.data.num_samples > 0 else None)
+    cap = max_samples if max_samples is not None else rc.data.num_samples
     if rc.data.dataset == "synthetic":
+        if cap is None:
+            raise ValueError("data.num_samples must be set for synthetic dataset.")
         return SyntheticVQADataset(
-            num_samples=cap or rc.data.num_samples,
+            num_samples=int(cap),
             image_size=224,
             seed=rc.train.seed,
         )
@@ -208,10 +210,12 @@ def load_ckpt(
     device: torch.device,
     *,
     expected_stage: Stage | None = None,
-) -> tuple[int, str]:
+) -> tuple[int, str, str | None, str | None]:
     ckpt = torch.load(ckpt_path, map_location=device)
     step = int(ckpt["step"])
     stage = str(ckpt["stage"])
+    wandb_run_id = ckpt.get("wandb_run_id") if isinstance(ckpt.get("wandb_run_id"), str) else None
+    wandb_project = ckpt.get("wandb_project") if isinstance(ckpt.get("wandb_project"), str) else None
 
     if "model" in ckpt:
         model.load_state_dict(ckpt["model"], strict=True)
@@ -241,7 +245,7 @@ def load_ckpt(
         optm.load_state_dict(ckpt["optimizer"])
 
     typer.echo(f"ckpt: loaded {ckpt_path}")
-    return step, stage
+    return step, stage, wandb_run_id, wandb_project
 
 
 def main(
@@ -385,10 +389,51 @@ def main(
     save_every_eff = save_every if save_every is not None else rc.train.save_every
     max_grad_norm = rc.train.max_grad_norm
 
+    start_step = 0
+    global_step = 0
+    resume_wandb_id: str | None = None
+    resume_wandb_project: str | None = None
+    if resume is not None:
+        ckpt_path = Path(resume)
+        if ckpt_path.is_dir():
+            direct_ckpt = ckpt_path / "ckpt.pt"
+            if direct_ckpt.exists():
+                ckpt_path = direct_ckpt
+            elif not ckpt_path.name.startswith("step"):
+                step_paths = sorted(
+                    ckpt_path.glob("step_*"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if not step_paths:
+                    raise FileNotFoundError(f"No step_* checkpoints found in: {ckpt_path}")
+                ckpt_path = step_paths[0] / "ckpt.pt"
+            else:
+                ckpt_path = ckpt_path / "ckpt.pt"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
+        start_step, ckpt_stage, resume_wandb_id, resume_wandb_project = load_ckpt(
+            ckpt_path, model, optm, device, expected_stage=stage
+        )
+        typer.echo(f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})")
+        if start_step > 0:
+            scheduler.last_epoch = start_step - 1
+            global_step = start_step
+
     wandb_run_id: str | None = None
     wandb_project: str | None = None
     if rc.logging.backend == "wandb":
-        wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
+        if resume_wandb_id is not None:
+            project_name = resume_wandb_project or rc.project.name
+            wandb.init(
+                id=resume_wandb_id,
+                resume="allow",
+                project=project_name,
+                name=rc.project.run_name,
+                config=raw_cfg,
+            )
+        else:
+            wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
         if wandb.run is not None:
             wandb_run_id = wandb.run.id
             wandb_project = wandb.run.project
@@ -398,20 +443,6 @@ def main(
         wandb.define_metric("textvqa_eval/*", step_metric="global_step")
     elif rc.logging.backend == "mlflow":
         raise NotImplementedError("mlflow logging not implemented.")
-
-    start_step = 0
-    global_step = 0
-    if resume is not None:
-        ckpt_path = Path(resume)
-        if ckpt_path.is_dir():
-            ckpt_path = ckpt_path / "ckpt.pt"
-        if not ckpt_path.exists():
-            raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
-        start_step, ckpt_stage = load_ckpt(ckpt_path, model, optm, device, expected_stage=stage)
-        typer.echo(f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})")
-        if start_step > 0:
-            scheduler.last_epoch = start_step - 1
-            global_step = start_step
 
     model.train()
     optm.zero_grad(set_to_none=True)

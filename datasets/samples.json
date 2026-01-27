@@ -1,0 +1,32 @@
+[
+  {
+    "dataset": "sharegpt4v_coco",
+    "split": "train",
+    "image_path": "000000000073.jpg",
+    "question": "what is the license plate of this vehicle"
+  },
+  {
+    "dataset": "sharegpt4v_coco",
+    "split": "train",
+    "image_path": "000000000208.jpg",
+    "question": "what utensil do you see? who holds it?"
+  },
+  {
+    "dataset": "sharegpt4v_coco",
+    "split": "train",
+    "image_path": "000000000471.jpg",
+    "question": "what is written on the side of the bus?"
+  },
+  {
+    "dataset": "sharegpt4v_coco",
+    "split": "train",
+    "image_path": "000000000730.jpg",
+    "question": "what is written on the front of the bus?"
+  },
+  {
+    "dataset": "sharegpt4v_coco",
+    "split": "validation",
+    "image_path": "000000001523.jpg",
+    "question": "what is written on the side of the truck?"
+  }
+]

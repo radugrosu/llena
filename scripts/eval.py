@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 import json
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import typer
@@ -15,12 +15,30 @@ import wandb
 
 from scripts.utils import get_git_commit
 
-from data.format import load_vqa_jsonl_dataset
+from data.format import JsonlVQADataset, load_vqa_jsonl_dataset
 from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator
 from mm.model import LlenaModel, LlenaModelConfig, _select_or_pad_tokens
 from mm.run_config import RunConfig
 from mm.types import VQASample
+from PIL import Image
+
+
+class EvalSample(VQASample):
+    dataset: str
+    split: str
+    image_path: str
+
+
+class _EvalSamplesDataset(Dataset[EvalSample]):
+    def __init__(self, samples: list[EvalSample]) -> None:
+        self.samples = samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> EvalSample:
+        return self.samples[idx]
 
 
 def opt(default: object, help: str):
@@ -59,9 +77,12 @@ def get_device(device: str, *, force_cuda: bool) -> torch.device:
 
 def build_dataset(rc: RunConfig, *, max_samples: int | None) -> Dataset:
     if rc.data.dataset == "synthetic":
-        num_samples = rc.data.num_samples if max_samples is None else max_samples
+        if max_samples is None and rc.data.num_samples is None:
+            raise ValueError("data.num_samples must be set for synthetic dataset.")
+        num_samples = max_samples if max_samples is not None else rc.data.num_samples
+        assert num_samples is not None
         return SyntheticVQADataset(
-            num_samples=num_samples,
+            num_samples=int(num_samples),
             image_size=224,
             seed=rc.train.seed,
         )
@@ -276,6 +297,101 @@ def _collate_eval_generate(
     return vision["pixel_values"], questions, answers_list
 
 
+def _collate_eval_generate_with_images(
+    image_proc: SiglipImageProcessor,
+    batch: list[EvalSample],
+) -> tuple[
+    torch.Tensor,
+    list[str],
+    list[list[str]],
+    list[Image.Image],
+    list[dict[str, str]],
+    list[str],
+]:
+    images = [ex["image"] for ex in batch]
+    questions = [ex["question"] for ex in batch]
+    answers_list: list[list[str]] = []
+    metas: list[dict[str, str]] = []
+    answers_primary: list[str] = []
+    for ex in batch:
+        if "answers" in ex and ex["answers"]:
+            answers_list.append(ex["answers"])
+        else:
+            answers_list.append([ex["answer"]])
+        answers_primary.append(ex["answer"])
+        meta = {"dataset": ex["dataset"], "split": ex["split"], "image_path": ex["image_path"]}
+        metas.append(meta)
+    vision = image_proc(images=images, return_tensors="pt")
+    return vision["pixel_values"], questions, answers_list, images, metas, answers_primary
+
+
+def _generate_batch(
+    model: LlenaModel,
+    pixel_values: torch.Tensor,
+    questions: list[str],
+    *,
+    device: torch.device,
+    tokenizer,
+    pad_id: int,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+    max_new_tokens: int,
+    repetition_penalty: float,
+) -> list[str]:
+    pixel_values = pixel_values.to(device)
+    prompt_ids: list[list[int]] = []
+    for q in questions:
+        ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": q}],
+            add_generation_prompt=True,
+            tokenize=True,
+            return_tensors=None,
+        )
+        prompt_ids.append(ids)
+
+    input_ids, attention_mask = _pad_batch_1d(prompt_ids, pad_value=int(pad_id))
+    input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
+
+    v_out = model.vision(pixel_values=pixel_values)
+    v_tokens = v_out.last_hidden_state
+    if model.freeze_vision:
+        v_tokens = v_tokens.detach()
+    v_tokens = _select_or_pad_tokens(v_tokens, model.num_image_tokens)
+    proj_dtype = next(model.projector.parameters()).dtype
+    v_tokens = v_tokens.to(dtype=proj_dtype)
+    img_embeds = model.projector(v_tokens)
+
+    text_embeds = model.llm.get_input_embeddings()(input_ids)  # pyright: ignore[reportCallIssue]
+    if img_embeds.dtype != text_embeds.dtype:
+        img_embeds = img_embeds.to(dtype=text_embeds.dtype)
+    inputs_embeds = torch.cat([img_embeds, text_embeds], dim=1)
+
+    prefix_mask = torch.ones(
+        (attention_mask.size(0), model.num_image_tokens),
+        dtype=attention_mask.dtype,
+        device=attention_mask.device,
+    )
+    mm_attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+
+    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+        gen_ids = model.llm.generate(  # pyright: ignore[reportCallIssue]
+            inputs_embeds=inputs_embeds,
+            attention_mask=mm_attention_mask,
+            do_sample=False,
+            num_beams=1,
+            max_new_tokens=max_new_tokens,
+            temperature=0.0,
+            repetition_penalty=repetition_penalty,
+            pad_token_id=pad_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+    prefix_len = inputs_embeds.size(1)
+    gen_new = gen_ids[:, prefix_len:].tolist()
+    return tokenizer.batch_decode(gen_new, skip_special_tokens=True)
+
+
 def eval_loop_generate(
     model: LlenaModel,
     dl: DataLoader,
@@ -301,58 +417,18 @@ def eval_loop_generate(
 
     with torch.no_grad():
         for step, (images, questions, answers_list) in enumerate(dl, start=1):
-            pixel_values = images.to(device)
-            prompt_ids: list[list[int]] = []
-            for q in questions:
-                ids = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": q}],
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    return_tensors=None,
-                )
-                prompt_ids.append(ids)
-
-            input_ids, attention_mask = _pad_batch_1d(prompt_ids, pad_value=int(pad_id))
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-
-            v_out = model.vision(pixel_values=pixel_values)
-            v_tokens = v_out.last_hidden_state
-            if model.freeze_vision:
-                v_tokens = v_tokens.detach()
-            v_tokens = _select_or_pad_tokens(v_tokens, model.num_image_tokens)
-            proj_dtype = next(model.projector.parameters()).dtype
-            v_tokens = v_tokens.to(dtype=proj_dtype)
-            img_embeds = model.projector(v_tokens)
-
-            text_embeds = model.llm.get_input_embeddings()(input_ids)  # pyright: ignore[reportCallIssue]
-            if img_embeds.dtype != text_embeds.dtype:
-                img_embeds = img_embeds.to(dtype=text_embeds.dtype)
-            inputs_embeds = torch.cat([img_embeds, text_embeds], dim=1)
-
-            prefix_mask = torch.ones(
-                (attention_mask.size(0), model.num_image_tokens),
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
+            preds = _generate_batch(
+                model,
+                images,
+                questions,
+                device=device,
+                tokenizer=tokenizer,
+                pad_id=int(pad_id),
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                max_new_tokens=max_new_tokens,
+                repetition_penalty=repetition_penalty,
             )
-            mm_attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
-
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                gen_ids = model.llm.generate(  # pyright: ignore[reportCallIssue]
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=mm_attention_mask,
-                    do_sample=False,
-                    num_beams=1,
-                    max_new_tokens=max_new_tokens,
-                    temperature=0.0,
-                    repetition_penalty=repetition_penalty,
-                    pad_token_id=pad_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                )
-
-            prefix_len = inputs_embeds.size(1)
-            gen_new = gen_ids[:, prefix_len:].tolist()
-            preds = tokenizer.batch_decode(gen_new, skip_special_tokens=True)
 
             for pred_text, answers in zip(preds, answers_list):
                 if dataset == "textvqa":
@@ -379,6 +455,198 @@ def eval_loop_generate(
     }
 
 
+def load_eval_samples_spec(
+    path: Path,
+    *,
+    default_dataset: str,
+    default_split: str,
+) -> list[dict[str, object]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Eval samples file not found: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if isinstance(raw, dict) and "samples" in raw:
+        raw = raw["samples"]
+    if not isinstance(raw, list):
+        raise TypeError("Eval samples JSON must be a list or a dict with 'samples'.")
+    refs: list[dict[str, object]] = []
+    for i, item in enumerate(raw):
+        if isinstance(item, str):
+            refs.append(
+                {
+                    "dataset": default_dataset,
+                    "split": default_split,
+                    "image_path": item,
+                }
+            )
+            continue
+        if not isinstance(item, dict):
+            raise TypeError(f"Eval sample {i} must be a dict or string, got {type(item).__name__}.")
+        dataset = str(item.get("dataset") or default_dataset)
+        split = str(item.get("split") or default_split)
+        if "index" in item:
+            index_val = item["index"]
+            if not isinstance(index_val, int):
+                raise TypeError(f"Eval sample {i} index must be int, got {type(index_val).__name__}.")
+            refs.append({"dataset": dataset, "split": split, "index": index_val})
+            continue
+        image_path = item.get("image_path") or item.get("path") or item.get("image")
+        if not isinstance(image_path, str):
+            raise ValueError(f"Eval sample {i} must include index or image_path.")
+        question = item.get("question")
+        if question is not None and not isinstance(question, str):
+            raise TypeError(f"Eval sample {i} question must be str when provided.")
+        ref: dict[str, object] = {
+            "dataset": dataset,
+            "split": split,
+            "image_path": image_path,
+        }
+        if question is not None:
+            ref["question"] = question
+        refs.append(ref)
+    return refs
+
+
+def resolve_eval_samples(
+    refs: list[dict[str, object]],
+    *,
+    data_dir: Path,
+) -> list[EvalSample]:
+    samples: list[EvalSample] = []
+    cache: dict[tuple[str, str], JsonlVQADataset] = {}
+    for ref in refs:
+        dataset = str(ref["dataset"])
+        split = str(ref["split"])
+        key = (dataset, split)
+        ds = cache.get(key)
+        if ds is None:
+            ds = cast(
+                JsonlVQADataset,
+                load_vqa_jsonl_dataset(
+                    dataset=dataset,
+                    data_dir=data_dir,
+                    split=split,
+                    max_samples=None,
+                ),
+            )
+            cache[key] = ds
+
+        idx: int | None = None
+        if "index" in ref:
+            index_val = ref["index"]
+            if not isinstance(index_val, int):
+                raise TypeError("Eval sample index must be int.")
+            idx = index_val
+        else:
+            image_path = str(ref["image_path"])
+            question = str(ref["question"]) if "question" in ref else None
+            records = ds.records
+            for rec_idx, rec in enumerate(records):
+                if rec.image_path != image_path:
+                    continue
+                if question is not None and rec.question != question:
+                    continue
+                idx = rec_idx
+                if question is not None:
+                    break
+            if idx is None:
+                suffix = f" and question='{question}'" if question is not None else ""
+                raise ValueError(f"Eval sample not found: {dataset}/{split} image_path={image_path}{suffix}")
+
+        if idx < 0 or idx >= len(ds):
+            raise IndexError(f"Eval sample index out of range: {dataset}/{split} index={idx}")
+
+        sample = ds[idx]
+        image_path = ds.records[idx].image_path
+        sample_out: EvalSample = {
+            "image": sample["image"],
+            "question": sample["question"],
+            "answer": sample["answer"],
+            "dataset": dataset,
+            "split": split,
+            "image_path": image_path,
+        }
+        if "answers" in sample and sample["answers"]:
+            sample_out["answers"] = sample["answers"]
+        samples.append(sample_out)
+    return samples
+
+
+def _log_eval_samples(
+    *,
+    model: LlenaModel,
+    image_proc: SiglipImageProcessor,
+    samples: list[EvalSample],
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+    batch_size: int,
+    max_new_tokens: int,
+    repetition_penalty: float,
+    ckpt_step: int,
+    log_wandb: bool,
+) -> list[dict[str, object]]:
+    if not samples:
+        return []
+
+    model.eval()
+    tokenizer = model.tokenizer
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    if pad_id is None:
+        raise ValueError("Tokenizer has no pad_token_id or eos_token_id.")
+
+    table = wandb.Table(columns=["dataset", "split", "image", "query", "answer", "response"]) if log_wandb else None
+    outputs: list[dict[str, object]] = []
+    dl = DataLoader(
+        _EvalSamplesDataset(samples),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda b: _collate_eval_generate_with_images(image_proc, b),
+        num_workers=0,
+    )
+
+    with torch.no_grad():
+        for images, questions, answers_list, raw_images, metas, answers_primary in dl:
+            preds = _generate_batch(
+                model,
+                images,
+                questions,
+                device=device,
+                tokenizer=tokenizer,
+                pad_id=int(pad_id),
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                max_new_tokens=max_new_tokens,
+                repetition_penalty=repetition_penalty,
+            )
+            for pred_text, q, img, meta, ans, answers in zip(
+                preds, questions, raw_images, metas, answers_primary, answers_list
+            ):
+                dataset = meta.get("dataset", "")
+                split = meta.get("split", "")
+                image_path = meta.get("image_path", "")
+                if log_wandb and table is not None:
+                    table.add_data(dataset, split, wandb.Image(img), q, ans, pred_text)
+                outputs.append(
+                    {
+                        "dataset": dataset,
+                        "split": split,
+                        "image_path": image_path,
+                        "question": q,
+                        "answer": ans,
+                        "answers": answers,
+                        "response": pred_text,
+                    }
+                )
+
+    if log_wandb and table is not None:
+        payload: dict[str, object] = {"eval_samples/table": table}
+        if ckpt_step >= 0:
+            payload["global_step"] = float(ckpt_step)
+        wandb.log(payload)
+    return outputs
+
+
 def run_eval(
     *,
     ckpt: str,
@@ -387,6 +655,7 @@ def run_eval(
     override: list[str],
     log_every: int,
     eval_mode: Literal["teacher", "generate"] | None,
+    eval_samples_path: str | None,
 ) -> tuple[dict[str, float], str]:
     commit = get_git_commit()
     ckpt_meta = _load_ckpt_meta(ckpt)
@@ -521,6 +790,28 @@ def run_eval(
         if ckpt_step >= 0:
             payload["global_step"] = float(ckpt_step)
         wandb.log(payload)
+
+    eval_samples_outputs: list[dict[str, object]] = []
+    if eval_samples_path is not None:
+        refs = load_eval_samples_spec(
+            Path(eval_samples_path),
+            default_dataset=rc.data.dataset,
+            default_split=rc.data.split,
+        )
+        samples = resolve_eval_samples(refs, data_dir=Path(rc.data.data_dir))
+        eval_samples_outputs = _log_eval_samples(
+            model=model,
+            image_proc=image_proc,
+            samples=samples,
+            device=device,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+            batch_size=batch_size,
+            max_new_tokens=128,
+            repetition_penalty=1.0,
+            ckpt_step=ckpt_step,
+            log_wandb=rc.logging.backend == "wandb" and run_id is not None,
+        )
     report = {
         "dataset": rc.data.dataset,
         "split": rc.data.split,
@@ -528,6 +819,8 @@ def run_eval(
         "metrics": metrics,
         "commit": commit,
     }
+    if eval_samples_outputs:
+        report["eval_samples"] = eval_samples_outputs
     report_path = (
         Path(rc.paths.reports_dir)
         / f"eval_{rc.project.run_name}_step{ckpt_step}_{rc.data.dataset}_{rc.data.split}.json"
@@ -549,6 +842,7 @@ def main(
     max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
     dataset: str | None = opt(None, "Override data.dataset for eval"),
     split: str | None = opt(None, "Override data.split for eval"),
+    eval_samples_path: str | None = opt(None, "Path to JSON with eval samples for W&B logging"),
     override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
     log_every: int = opt(100, "Log progress every N batches (0 disables)"),
     eval_mode: Literal["teacher", "generate"] | None = opt(None, "Eval mode: generate | teacher (None = config)"),
@@ -566,6 +860,7 @@ def main(
         override=override,
         log_every=log_every,
         eval_mode=eval_mode,
+        eval_samples_path=eval_samples_path,
     )
     msg = f"eval: count={int(metrics['count'])} avg_loss={metrics['avg_loss']:.4f}"
     if dataset == "textvqa":

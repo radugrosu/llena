@@ -24,7 +24,7 @@ train:
   max_seq_len: 1536
   epochs: 1
   batch_size: 128
-  micro_batch_size: 16
+  micro_batch_size: 2
   log_every: 10
   eval_every: 200
   save_every: 200
@@ -37,22 +37,21 @@ train:
       lora_alpha: 256
       lora_dropout: 0.05
       lora_targets:
-      - q_proj
-      - k_proj
-      - v_proj
-      - o_proj
-      - gate_proj
-      - up_proj
-      - down_proj
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - gate_proj
+        - up_proj
+        - down_proj
   lr: 0.0002
 data:
   dataset: llava_textvqa
   data_dir: datasets/processed
   split: train
-  num_samples: 0
 logging:
   backend: wandb
   wandb_project: llena
 eval:
   mode: teacher
-  batch_size: 32
+  batch_size: 2
