@@ -56,3 +56,4 @@ logging:
 eval:
   mode: teacher
   batch_size: 8
+  max_generated_tokens: 256

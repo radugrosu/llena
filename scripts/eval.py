@@ -335,7 +335,7 @@ def _generate_batch(
     pad_id: int,
     use_amp: bool,
     amp_dtype: torch.dtype,
-    max_new_tokens: int,
+    max_generated_tokens: int,
     repetition_penalty: float,
 ) -> list[str]:
     pixel_values = pixel_values.to(device)
@@ -380,16 +380,14 @@ def _generate_batch(
             attention_mask=mm_attention_mask,
             do_sample=False,
             num_beams=1,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=max_generated_tokens,
             temperature=0.0,
             repetition_penalty=repetition_penalty,
             pad_token_id=pad_id,
             eos_token_id=tokenizer.eos_token_id,
         )
-
-    prefix_len = inputs_embeds.size(1)
-    gen_new = gen_ids[:, prefix_len:].tolist()
-    return tokenizer.batch_decode(gen_new, skip_special_tokens=True)
+    gen_ids = cast(torch.Tensor, gen_ids)
+    return tokenizer.batch_decode(gen_ids.tolist(), skip_special_tokens=True)
 
 
 def eval_loop_generate(
@@ -401,7 +399,7 @@ def eval_loop_generate(
     *,
     use_amp: bool,
     amp_dtype: torch.dtype,
-    max_new_tokens: int = 128,
+    max_generated_tokens: int = 128,
     repetition_penalty: float = 1.0,
 ) -> dict[str, float]:
     model.eval()
@@ -426,7 +424,7 @@ def eval_loop_generate(
                 pad_id=int(pad_id),
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
-                max_new_tokens=max_new_tokens,
+                max_generated_tokens=max_generated_tokens,
                 repetition_penalty=repetition_penalty,
             )
 
@@ -555,7 +553,7 @@ def resolve_eval_samples(
         image_path = ds.records[idx].image_path
         question_override = ref.get("question")
         use_question = str(question_override) if question_override is not None else sample["question"]
-        use_answer = "" if question_override is not None else sample["answer"]
+        use_answer = sample["answer"]
         sample_out: EvalSample = {
             "image": sample["image"],
             "question": use_question,
@@ -564,7 +562,7 @@ def resolve_eval_samples(
             "split": split,
             "image_path": image_path,
         }
-        if question_override is None and "answers" in sample and sample["answers"]:
+        if "answers" in sample and sample["answers"]:
             sample_out["answers"] = sample["answers"]
         samples.append(sample_out)
     return samples
@@ -579,7 +577,7 @@ def _log_eval_samples(
     use_amp: bool,
     amp_dtype: torch.dtype,
     batch_size: int,
-    max_new_tokens: int,
+    max_generated_tokens: int,
     repetition_penalty: float,
     ckpt_step: int,
     log_wandb: bool,
@@ -614,7 +612,7 @@ def _log_eval_samples(
                 pad_id=int(pad_id),
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
-                max_new_tokens=max_new_tokens,
+                max_generated_tokens=max_generated_tokens,
                 repetition_penalty=repetition_penalty,
             )
             for pred_text, q, img, meta, ans, answers in zip(
@@ -780,6 +778,7 @@ def run_eval(
             log_every,
             use_amp=use_amp,
             amp_dtype=amp_dtype,
+            max_generated_tokens=rc.eval.max_generated_tokens,
         )
     ckpt_step = int(ckpt_meta["step"])  # pyright: ignore[reportArgumentType]
     if rc.logging.backend == "wandb" and run_id is not None:
@@ -805,7 +804,7 @@ def run_eval(
             use_amp=use_amp,
             amp_dtype=amp_dtype,
             batch_size=batch_size,
-            max_new_tokens=128,
+            max_generated_tokens=rc.eval.max_generated_tokens,
             repetition_penalty=1.0,
             ckpt_step=ckpt_step,
             log_wandb=rc.logging.backend == "wandb" and run_id is not None,

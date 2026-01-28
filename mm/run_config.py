@@ -143,6 +143,7 @@ class EvalConfig:
     max_samples: int
     batch_size: int
     mode: Literal["teacher", "generate"] | None
+    max_generated_tokens: int
 
 
 @dataclass(frozen=True)
@@ -331,7 +332,7 @@ class RunConfig:
         # --- Eval ---
         eval_d = d.get("eval")
         if eval_d is None:
-            eval_cfg = EvalConfig(max_samples=0, batch_size=1, mode=None)
+            eval_cfg = EvalConfig(max_samples=0, batch_size=1, mode=None, max_generated_tokens=256)
         elif not isinstance(eval_d, dict):
             raise ValueError("eval must be a dict with max_samples, batch_size, and optional mode")
         else:
@@ -350,6 +351,7 @@ class RunConfig:
                 max_samples=int(eval_d.get("max_samples", 0)),
                 batch_size=int(eval_d["batch_size"]),
                 mode=cast(Literal["teacher", "generate"] | None, mode_val),
+                max_generated_tokens=int(eval_d.get("max_generated_tokens", 256)),
             )
 
         if run_name is None:
