@@ -539,34 +539,32 @@ def resolve_eval_samples(
             idx = index_val
         else:
             image_path = str(ref["image_path"])
-            question = str(ref["question"]) if "question" in ref else None
             records = ds.records
             for rec_idx, rec in enumerate(records):
                 if rec.image_path != image_path:
                     continue
-                if question is not None and rec.question != question:
-                    continue
                 idx = rec_idx
-                if question is not None:
-                    break
+                break
             if idx is None:
-                suffix = f" and question='{question}'" if question is not None else ""
-                raise ValueError(f"Eval sample not found: {dataset}/{split} image_path={image_path}{suffix}")
+                raise ValueError(f"Eval sample not found: {dataset}/{split} image_path={image_path}")
 
         if idx < 0 or idx >= len(ds):
             raise IndexError(f"Eval sample index out of range: {dataset}/{split} index={idx}")
 
         sample = ds[idx]
         image_path = ds.records[idx].image_path
+        question_override = ref.get("question")
+        use_question = str(question_override) if question_override is not None else sample["question"]
+        use_answer = "" if question_override is not None else sample["answer"]
         sample_out: EvalSample = {
             "image": sample["image"],
-            "question": sample["question"],
-            "answer": sample["answer"],
+            "question": use_question,
+            "answer": use_answer,
             "dataset": dataset,
             "split": split,
             "image_path": image_path,
         }
-        if "answers" in sample and sample["answers"]:
+        if question_override is None and "answers" in sample and sample["answers"]:
             sample_out["answers"] = sample["answers"]
         samples.append(sample_out)
     return samples
@@ -836,28 +834,30 @@ def run_eval(
     return metrics, rc.data.dataset
 
 
-def main(
-    ckpt: str = opt(..., "Path to a ckpt.pt or a step_* directory"),
-    batch_size: int | None = opt(None, "Eval batch size (None = config)"),
-    max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
-    dataset: str | None = opt(None, "Override data.dataset for eval"),
-    split: str | None = opt(None, "Override data.split for eval"),
-    eval_samples_path: str | None = opt(None, "Path to JSON with eval samples for W&B logging"),
-    override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
-    log_every: int = opt(100, "Log progress every N batches (0 disables)"),
-    eval_mode: Literal["teacher", "generate"] | None = opt(None, "Eval mode: generate | teacher (None = config)"),
+def run_eval_main(
+    *,
+    ckpt: str,
+    batch_size: int | None = None,
+    max_samples: int | None = None,
+    dataset: str | None = None,
+    split: str | None = None,
+    eval_samples_path: str | None = None,
+    override: list[str] | None = None,
+    log_every: int = 100,
+    eval_mode: Literal["teacher", "generate"] | None = None,
 ) -> None:
+    overrides = override or []
     load_dotenv()
     typer.echo("eval: starting", err=True)
     if dataset is not None:
-        override.append(f"data.dataset={dataset}")
+        overrides.append(f"data.dataset={dataset}")
     if split is not None:
-        override.append(f"data.split={split}")
+        overrides.append(f"data.split={split}")
     metrics, dataset = run_eval(
         ckpt=ckpt,
         batch_size=batch_size,
         max_samples=max_samples,
-        override=override,
+        override=overrides,
         log_every=log_every,
         eval_mode=eval_mode,
         eval_samples_path=eval_samples_path,
@@ -870,6 +870,30 @@ def main(
     else:
         msg += f" exact_match={metrics['exact_match']:.4f}"
     typer.echo(msg)
+
+
+def main(
+    ckpt: str = opt(..., "Path to a ckpt.pt or a step_* directory"),
+    batch_size: int | None = opt(None, "Eval batch size (None = config)"),
+    max_samples: int | None = opt(None, "Limit number of samples (None = config)"),
+    dataset: str | None = opt(None, "Override data.dataset for eval"),
+    split: str | None = opt(None, "Override data.split for eval"),
+    eval_samples_path: str | None = opt(None, "Path to JSON with eval samples for W&B logging"),
+    override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
+    log_every: int = opt(100, "Log progress every N batches (0 disables)"),
+    eval_mode: Literal["teacher", "generate"] | None = opt(None, "Eval mode: generate | teacher (None = config)"),
+) -> None:
+    run_eval_main(
+        ckpt=ckpt,
+        batch_size=batch_size,
+        max_samples=max_samples,
+        dataset=dataset,
+        split=split,
+        eval_samples_path=eval_samples_path,
+        override=override,
+        log_every=log_every,
+        eval_mode=eval_mode,
+    )
     typer.echo("eval: done", err=True)
 
 

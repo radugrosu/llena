@@ -248,18 +248,20 @@ def load_ckpt(
     return step, stage, wandb_run_id, wandb_project
 
 
-def main(
-    config: str = opt(..., "Path to YAML config"),
-    max_steps: int | None = opt(None, "Max training steps (overrides config)"),
-    out_dir: str = opt("artifacts", "Base output directory for checkpoints/config"),
-    resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
-    save_every: int | None = opt(None, "Override train.save_every (int). If None, use config."),
-    save_trainable_only: bool = opt(True, "If true, saves only projector/adapters for PEFT stages."),
-    override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
+def run_train(
+    *,
+    config: str,
+    max_steps: int | None = None,
+    out_dir: str = "artifacts",
+    resume: str | None = None,
+    save_every: int | None = None,
+    save_trainable_only: bool = True,
+    override: list[str] | None = None,
 ) -> None:
+    overrides = override or []
     load_dotenv()
     commit = get_git_commit()
-    raw_cfg = load_config(config, overrides=override)
+    raw_cfg = load_config(config, overrides=overrides)
     rc = RunConfig.from_dict(raw_cfg)
     raw_cfg["project"]["run_name"] = rc.project.run_name  # pyright: ignore[reportIndexIssue]
 
@@ -383,7 +385,7 @@ def main(
     use_amp = device.type == "cuda" and rc.train.precision in {"bf16", "fp16"}
     amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
     use_scaler = rc.train.precision == "fp16"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+    scaler = torch.amp.GradScaler(device.type, enabled=use_scaler)  # pyright: ignore[reportPrivateImportUsage]
 
     log_every = rc.train.log_every
     save_every_eff = save_every if save_every is not None else rc.train.save_every
@@ -499,16 +501,16 @@ def main(
                     )
                     if rc.logging.backend == "wandb":
                         wandb.log(
-                        {
-                            "global_step": global_step,
-                            "train/loss": last_loss,
-                            "train/samples_per_s": samples_per_s,
-                            "train/tokens_per_s": tokens_per_s,
-                            "train/lr": optm.param_groups[0]["lr"],
-                            "train/epoch": epoch + 1,
-                            **({"train/scale": float(scaler.get_scale())} if use_scaler else {}),
-                        }
-                    )
+                            {
+                                "global_step": global_step,
+                                "train/loss": last_loss,
+                                "train/samples_per_s": samples_per_s,
+                                "train/tokens_per_s": tokens_per_s,
+                                "train/lr": optm.param_groups[0]["lr"],
+                                "train/epoch": epoch + 1,
+                                **({"train/scale": float(scaler.get_scale())} if use_scaler else {}),
+                            }
+                        )
                     last_log_time = now
                     last_log_tokens = 0
                     last_log_samples = 0
@@ -574,6 +576,26 @@ def main(
 
     if rc.logging.backend == "wandb":
         wandb.finish()
+
+
+def main(
+    config: str = opt(..., "Path to YAML config"),
+    max_steps: int | None = opt(None, "Max training steps (overrides config)"),
+    out_dir: str = opt("artifacts", "Base output directory for checkpoints/config"),
+    resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
+    save_every: int | None = opt(None, "Override train.save_every (int). If None, use config."),
+    save_trainable_only: bool = opt(True, "If true, saves only projector/adapters for PEFT stages."),
+    override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
+) -> None:
+    run_train(
+        config=config,
+        max_steps=max_steps,
+        out_dir=out_dir,
+        resume=resume,
+        save_every=save_every,
+        save_trainable_only=save_trainable_only,
+        override=override,
+    )
 
 
 if __name__ == "__main__":
