@@ -87,7 +87,10 @@ def build_dataset(
         mix = ConcatDataset([llava_ds, VqaAsInstructDataset(text_ds)])
         if cap is None:
             return mix
-        return torch.utils.data.Subset(mix, range(cap))
+        cap_n = max(0, int(cap))
+        if cap_n >= len(mix):
+            return mix
+        return torch.utils.data.Subset(mix, range(cap_n))
     if rc.data.dataset == "sharegpt4v_coco":
         return load_vqa_jsonl_dataset(
             dataset=rc.data.dataset,
