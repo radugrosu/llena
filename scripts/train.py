@@ -365,14 +365,26 @@ def run_train(
     warmup_ratio = rc.train.warmup_ratio
     if max_steps is None:
         max_steps = rc.train.max_steps
-    total_micro_steps = max_steps if max_steps is not None else (len(dl) * rc.train.epochs)
-    total_optim_steps = max(1, math.ceil(total_micro_steps / accum))
-    warmup_steps = int(total_optim_steps * warmup_ratio)
+    if max_steps is not None:
+        # max_steps is expressed in optimizer-step units.
+        target_optim_steps = int(max_steps)
+        target_micro_steps = target_optim_steps * accum
+    else:
+        # Epoch mode: drop tail micro-batches that do not form a full accumulation window.
+        total_micro_steps = len(dl) * rc.train.epochs
+        target_micro_steps = (total_micro_steps // accum) * accum
+        dropped_micro_steps = total_micro_steps - target_micro_steps
+        if dropped_micro_steps > 0:
+            typer.echo(
+                f"train: dropping tail micro-batches ({dropped_micro_steps}) to keep full accumulation windows"
+            )
+        target_optim_steps = target_micro_steps // accum
+    warmup_steps = int(target_optim_steps * warmup_ratio)
 
     def lr_scale(step_idx: int) -> float:
         if warmup_steps > 0 and step_idx < warmup_steps:
             return float(step_idx + 1) / float(warmup_steps)
-        denom = max(1, total_optim_steps - warmup_steps)
+        denom = max(1, target_optim_steps - warmup_steps)
         progress = (step_idx - warmup_steps) / denom
         progress = min(max(progress, 0.0), 1.0)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
@@ -457,6 +469,8 @@ def run_train(
 
     for epoch in range(rc.train.epochs):
         for batch in dl:
+            if step >= target_micro_steps:
+                break
             step += 1
             batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
 
@@ -541,9 +555,9 @@ def run_train(
                         run_config=raw_cfg,
                     )
 
-            if max_steps is not None and global_step >= max_steps:
+            if global_step >= target_optim_steps:
                 break
-        if max_steps is not None and global_step >= max_steps:
+        if step >= target_micro_steps or global_step >= target_optim_steps:
             break
 
     save_ckpt(
