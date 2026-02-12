@@ -87,7 +87,10 @@ def build_dataset(rc: RunConfig, *, max_samples: int | None) -> Dataset:
             seed=rc.train.seed,
         )
     if rc.data.dataset in {"llava_instruct", "llava_textvqa"}:
-        raise ValueError("llava_instruct is not supported for eval.")
+        raise ValueError(
+            "Instruct-style datasets (llava_instruct, llava_textvqa) are not supported for eval; "
+            "use a VQA dataset such as textvqa or docvqa."
+        )
     cap = rc.data.num_samples if max_samples is None else max_samples
     return load_vqa_jsonl_dataset(
         dataset=rc.data.dataset,
@@ -174,7 +177,7 @@ def anls_score(pred: str, answers: list[str]) -> float:
         if not norm_ans:
             continue
         dist = _levenshtein(norm_pred, norm_ans)
-        sim = 1.0 - (dist / max(len(norm_ans), 1))
+        sim = 1.0 - (dist / max(len(norm_pred), len(norm_ans), 1))
         if sim < 0.5:
             sim = 0.0
         if sim > best:
@@ -182,7 +185,7 @@ def anls_score(pred: str, answers: list[str]) -> float:
     return best
 
 
-def eval_loop(
+def eval_loop_teacher(
     model: LlenaModel,
     dl: DataLoader,
     device: torch.device,
@@ -751,7 +754,7 @@ def run_eval(
         )
 
         typer.echo("eval: starting eval loop (teacher)")
-        metrics = eval_loop(
+        metrics = eval_loop_teacher(
             model,
             dl,
             device,

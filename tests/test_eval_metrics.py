@@ -19,3 +19,8 @@ def test_anls_score() -> None:
     assert anls_score("contract", answers) == 1.0
     assert anls_score("contracts", answers) > 0.5
     assert anls_score("xxxx", answers) == 0.0
+
+
+def test_anls_uses_max_pred_or_answer_length() -> None:
+    # dist=4 between "abcdxxxx" and "abcd": similarity should be 1 - 4/8 = 0.5
+    assert anls_score("abcdxxxx", ["abcd"]) == 0.5
