@@ -514,7 +514,6 @@ def run_train(
                                 "train/samples_per_s": samples_per_s,
                                 "train/tokens_per_s": tokens_per_s,
                                 "train/lr": optm.param_groups[0]["lr"],
-                                "train/epoch": epoch + 1,
                                 **({"train/scale": float(scaler.get_scale())} if use_scaler else {}),
                             }
                         )

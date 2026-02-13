@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 from transformers import SiglipImageProcessor
 
-from mm.types import ChatConversation, ChatTokenizer, InstructSample, VQASample
+from mm.types import ChatMessage, ChatTokenizer, CollatorBatch, InstructSample, VQASample
 
 
 def _ensure_pad_token(tokenizer: ChatTokenizer) -> int:
@@ -55,7 +55,7 @@ def _encode_chat_sft(
 
 def _encode_chat_packed(
     tokenizer: ChatTokenizer,
-    conversation: ChatConversation,
+    conversation: list[ChatMessage],
     max_len: int,
 ) -> tuple[list[int], list[int]]:
     if max_len <= 0:
@@ -70,11 +70,13 @@ def _encode_chat_packed(
         return_tensors=None,
     )
     labels = [-100] * len(full_ids)
-
+    has_assistant: bool = False
     for idx, msg in enumerate(conversation):
         role = msg.get("role")
         if role != "assistant":
             continue
+        else:
+            has_assistant = True
         prefix = conversation[:idx]
         ids_before = tokenizer.apply_chat_template(
             prefix,
@@ -96,7 +98,7 @@ def _encode_chat_packed(
             if j < len(full_ids):
                 labels[j] = full_ids[j]
 
-    if all(x == -100 for x in labels):
+    if not has_assistant:
         raise ValueError("No assistant tokens found for packed conversation.")
 
     if len(full_ids) <= max_len:
@@ -112,11 +114,7 @@ def _pad_batch_1d(
     if any(len(s) == 0 for s in sequences):
         raise ValueError("Encountered empty sequence in batch.")
     max_len = max((len(s) for s in sequences), default=0)
-    if (
-        pad_to_multiple_of is not None
-        and pad_to_multiple_of > 0
-        and max_len % pad_to_multiple_of != 0
-    ):
+    if pad_to_multiple_of is not None and pad_to_multiple_of > 0 and max_len % pad_to_multiple_of != 0:
         max_len = ((max_len // pad_to_multiple_of) + 1) * pad_to_multiple_of
 
     batch = torch.full((len(sequences), max_len), pad_value, dtype=torch.long)
@@ -139,17 +137,15 @@ def prepend_mm_prefix(
         return labels, attention_mask
 
     bsz = labels.size(0)
-    prefix_labels = torch.full(
-        (bsz, num_image_tokens), -100, dtype=labels.dtype, device=labels.device
-    )
-    prefix_attn = torch.ones(
+    prefix_labels = torch.full((bsz, num_image_tokens), -100, dtype=labels.dtype, device=labels.device)
+    prefix_mask = torch.ones(
         (bsz, num_image_tokens),
         dtype=attention_mask.dtype,
         device=attention_mask.device,
     )
 
     mm_labels = torch.cat([prefix_labels, labels], dim=1)
-    mm_attention_mask = torch.cat([prefix_attn, attention_mask], dim=1)
+    mm_attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
     return mm_labels, mm_attention_mask
 
 
@@ -161,7 +157,7 @@ class LlenaCollator:
     num_image_tokens: int = 256
     pad_to_multiple_of: int | None = 8
 
-    def __call__(self, batch: list[VQASample]) -> dict[str, torch.Tensor]:
+    def __call__(self, batch: list[VQASample]) -> CollatorBatch:
         pad_id = _ensure_pad_token(self.tokenizer)
 
         images = [ex["image"] for ex in batch]
@@ -194,15 +190,12 @@ class LlenaCollator:
         )
         labels_t = labels_t.to(torch.long)
 
-        mm_labels, mm_attention_mask = prepend_mm_prefix(
-            labels_t, attention_mask, self.num_image_tokens
-        )
+        mm_labels, mm_attention_mask = prepend_mm_prefix(labels_t, attention_mask, self.num_image_tokens)
 
         return {
             "pixel_values": pixel_values,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "labels": labels_t,
             "mm_labels": mm_labels,
             "mm_attention_mask": mm_attention_mask,
         }
@@ -216,7 +209,7 @@ class LlenaPackedCollator:
     num_image_tokens: int = 256
     pad_to_multiple_of: int | None = 8
 
-    def __call__(self, batch: list[InstructSample]) -> dict[str, torch.Tensor]:
+    def __call__(self, batch: list[InstructSample]) -> CollatorBatch:
         pad_id = _ensure_pad_token(self.tokenizer)
 
         images = [ex["image"] for ex in batch]
@@ -248,15 +241,12 @@ class LlenaPackedCollator:
         )
         labels_t = labels_t.to(torch.long)
 
-        mm_labels, mm_attention_mask = prepend_mm_prefix(
-            labels_t, attention_mask, self.num_image_tokens
-        )
+        mm_labels, mm_attention_mask = prepend_mm_prefix(labels_t, attention_mask, self.num_image_tokens)
 
         return {
             "pixel_values": pixel_values,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "labels": labels_t,
             "mm_labels": mm_labels,
             "mm_attention_mask": mm_attention_mask,
         }

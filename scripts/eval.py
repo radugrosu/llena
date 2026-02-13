@@ -20,7 +20,7 @@ from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator
 from mm.model import LlenaModel, LlenaModelConfig, _select_or_pad_tokens
 from mm.run_config import RunConfig
-from mm.types import VQASample
+from mm.types import CollatorBatch, VQASample
 from PIL import Image
 
 
@@ -273,7 +273,7 @@ def _pad_batch_1d(
 def _collate_eval_teacher(
     collator: LlenaCollator,
     batch: list[VQASample],
-) -> tuple[dict[str, torch.Tensor], list[list[str]]]:
+) -> tuple[CollatorBatch, list[list[str]]]:
     out = collator(batch)
     answers_list: list[list[str]] = []
     for ex in batch:
@@ -343,9 +343,9 @@ def _generate_batch(
 ) -> list[str]:
     pixel_values = pixel_values.to(device)
     prompt_ids: list[list[int]] = []
-    for q in questions:
+    for question in questions:
         ids = tokenizer.apply_chat_template(
-            [{"role": "user", "content": q}],
+            [{"role": "user", "content": question}],
             add_generation_prompt=True,
             tokenize=True,
             return_tensors=None,
@@ -735,7 +735,7 @@ def run_eval(
     ds = build_dataset(rc, max_samples=max_samples)
 
     if eval_mode is None:
-        eval_mode = rc.eval.mode or "teacher"
+        eval_mode = rc.eval.mode or "generate"
 
     if eval_mode == "teacher":
         collator = LlenaCollator(
@@ -819,6 +819,7 @@ def run_eval(
         "checkpoint": ckpt,
         "metrics": metrics,
         "commit": commit,
+        "eval_mode": eval_mode,
     }
     if eval_samples_outputs:
         report["eval_samples"] = eval_samples_outputs
@@ -834,7 +835,19 @@ def run_eval(
     if rc.logging.backend == "wandb" and run_id is not None:
         wandb.finish()
 
+    log_metrics(metrics, rc.data.dataset, eval_mode)
     return metrics, rc.data.dataset
+
+
+def log_metrics(metrics: dict[str, float], dataset: str, eval_mode: str):
+    msg = f"eval({eval_mode}): count={int(metrics['count'])} avg_loss={metrics['avg_loss']:.4f}"
+    if dataset == "textvqa":
+        msg += f" vqa_acc={metrics['vqa_accuracy']:.4f}"
+    elif dataset == "docvqa":
+        msg += f" anls={metrics['anls']:.4f}"
+    else:
+        msg += f" exact_match={metrics['exact_match']:.4f}"
+    return msg
 
 
 def run_eval_main(
@@ -856,7 +869,7 @@ def run_eval_main(
         overrides.append(f"data.dataset={dataset}")
     if split is not None:
         overrides.append(f"data.split={split}")
-    metrics, dataset = run_eval(
+    run_eval(
         ckpt=ckpt,
         batch_size=batch_size,
         max_samples=max_samples,
@@ -865,14 +878,6 @@ def run_eval_main(
         eval_mode=eval_mode,
         eval_samples_path=eval_samples_path,
     )
-    msg = f"eval: count={int(metrics['count'])} avg_loss={metrics['avg_loss']:.4f}"
-    if dataset == "textvqa":
-        msg += f" vqa_acc={metrics['vqa_accuracy']:.4f}"
-    elif dataset == "docvqa":
-        msg += f" anls={metrics['anls']:.4f}"
-    else:
-        msg += f" exact_match={metrics['exact_match']:.4f}"
-    typer.echo(msg)
 
 
 def main(

@@ -1,5 +1,6 @@
 from typing import Protocol, TypedDict, TypeAlias, Literal, NotRequired
 from PIL import Image
+import torch
 
 
 class VQASample(TypedDict):
@@ -10,13 +11,24 @@ class VQASample(TypedDict):
 
 
 Role: TypeAlias = Literal["user", "assistant", "system"]
-ChatMessage: TypeAlias = dict[str, str]  # {"role": "...", "content": "..."}
-ChatConversation: TypeAlias = list[ChatMessage]
+
+
+class ChatMessage(TypedDict):
+    role: Role
+    content: str
 
 
 class InstructSample(TypedDict):
     image: Image.Image
-    conversation: ChatConversation
+    conversation: list[ChatMessage]
+
+
+class CollatorBatch(TypedDict):
+    pixel_values: torch.Tensor
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    mm_labels: torch.Tensor
+    mm_attention_mask: torch.Tensor
 
 
 class ChatTokenizer(Protocol):
@@ -32,7 +44,7 @@ class ChatTokenizer(Protocol):
 
     def apply_chat_template(
         self,
-        conversation: ChatConversation,
+        conversation: list[ChatMessage],
         *,
         add_generation_prompt: bool,
         tokenize: bool,

@@ -75,7 +75,6 @@ class LlenaModel(nn.Module):
             return torch.float16
         if precision == "fp32":
             return torch.float32
-        raise ValueError(f"Unsupported precision: {precision}")
 
     def __init__(self, cfg: LlenaModelConfig):
         super().__init__()

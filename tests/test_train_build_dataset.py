@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+from typing import cast
 
 from torch.utils.data import Dataset
 
+from mm.run_config import RunConfig
 import scripts.train as train_script
 
 
@@ -33,8 +35,14 @@ def test_build_dataset_llava_textvqa_caps_to_dataset_len(monkeypatch) -> None:
         assert dataset == "llava_instruct"
         return _ListDataset(
             [
-                {"image": None, "conversation": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]},
-                {"image": None, "conversation": [{"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2"}]},
+                {
+                    "image": None,
+                    "conversation": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+                },
+                {
+                    "image": None,
+                    "conversation": [{"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2"}],
+                },
             ]
         )
 
@@ -51,8 +59,8 @@ def test_build_dataset_llava_textvqa_caps_to_dataset_len(monkeypatch) -> None:
     monkeypatch.setattr(train_script, "load_instruct_jsonl_dataset", fake_load_instruct_jsonl_dataset)
     monkeypatch.setattr(train_script, "load_vqa_jsonl_dataset", fake_load_vqa_jsonl_dataset)
 
-    ds = train_script.build_dataset(_rc_for_llava_textvqa(), max_samples=10)
-    assert len(ds) == 5
-    for i in range(len(ds)):
+    mock_conf = cast(RunConfig, _rc_for_llava_textvqa())
+    ds = train_script.build_dataset(mock_conf, max_samples=10)
+    assert len(ds) == 5  # pyright: ignore[reportArgumentType]
+    for i in range(len(ds)):  # pyright: ignore[reportArgumentType]
         _ = ds[i]
-

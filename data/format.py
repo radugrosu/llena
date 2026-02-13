@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 from PIL import Image
 from torch.utils.data import Dataset
 
-from mm.types import ChatConversation, InstructSample, VQASample
+from mm.types import ChatMessage, InstructSample, VQASample
+
+ROLES: set[Literal["user", "assistant", "system"]] = {"user", "assistant", "system"}
 
 
 @dataclass(frozen=True)
@@ -22,7 +24,7 @@ class VQARecord:
 @dataclass(frozen=True)
 class InstructRecord:
     image_path: str
-    conversation: ChatConversation
+    conversation: list[ChatMessage]
 
 
 def _parse_record(obj: object) -> VQARecord:
@@ -49,10 +51,10 @@ def _parse_record(obj: object) -> VQARecord:
     return VQARecord(image_path=image_val, question=question, answer=answer, answers=answers)
 
 
-def _parse_conversation(obj: object) -> ChatConversation:
+def _parse_conversation(obj: object) -> list[ChatMessage]:
     if not isinstance(obj, list):
         raise TypeError("Record conversation must be a list.")
-    convo: ChatConversation = []
+    convo: list[ChatMessage] = []
     for item in obj:
         if not isinstance(item, dict):
             raise TypeError("Conversation message must be a dict.")
@@ -61,7 +63,7 @@ def _parse_conversation(obj: object) -> ChatConversation:
         if not isinstance(role, str) or not isinstance(content, str):
             raise TypeError("Conversation message requires 'role' and 'content' as str.")
         role_l = role.lower()
-        if role_l not in {"user", "assistant", "system"}:
+        if role_l not in ROLES:
             raise ValueError(f"Unsupported role in conversation: {role}")
         convo.append({"role": role_l, "content": content})
     if not convo:
@@ -334,7 +336,7 @@ class VqaAsInstructDataset(Dataset):
 
     def __getitem__(self, idx: int) -> InstructSample:
         rec = self.base[idx]
-        conversation: ChatConversation = [
+        conversation: list[ChatMessage] = [
             {"role": "user", "content": rec["question"]},
             {"role": "assistant", "content": rec["answer"]},
         ]
