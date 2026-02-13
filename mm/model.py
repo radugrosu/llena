@@ -34,6 +34,7 @@ class LlenaModelConfig:
     projector: Literal["mlp2"]
     device: Literal["cpu", "cuda"]
     gradient_checkpointing: bool
+    precision: Literal["bf16", "fp16", "fp32"] = "bf16"
     attn_implementation: str | None = None
     freeze_vision: bool = True
     freeze_llm: bool = False
@@ -58,8 +59,30 @@ class LlenaModel(nn.Module):
     llm: Qwen2ForCausalLM | PeftModel
     projector: nn.Module
 
+    @staticmethod
+    def _resolve_dtype(
+        *,
+        device: Literal["cpu", "cuda"],
+        precision: Literal["bf16", "fp16", "fp32"],
+    ) -> torch.dtype:
+        if device == "cpu":
+            return torch.float32
+        if precision == "bf16":
+            if not torch.cuda.is_bf16_supported():
+                raise RuntimeError("precision='bf16' requested but CUDA BF16 is not supported on this device.")
+            return torch.bfloat16
+        if precision == "fp16":
+            return torch.float16
+        if precision == "fp32":
+            return torch.float32
+        raise ValueError(f"Unsupported precision: {precision}")
+
     def __init__(self, cfg: LlenaModelConfig):
         super().__init__()
+        target_device = torch.device("cuda" if cfg.device == "cuda" else "cpu")
+        if cfg.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("device='cuda' requested but CUDA is not available.")
+
         self.cfg = cfg
         self.freeze_vision = bool(cfg.freeze_vision)
 
@@ -79,7 +102,7 @@ class LlenaModel(nn.Module):
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype=self._resolve_dtype(device="cuda", precision=cfg.precision),
             )
             llm = Qwen2ForCausalLM.from_pretrained(
                 cfg.llm_name,
@@ -93,8 +116,7 @@ class LlenaModel(nn.Module):
             )
             self.llm = llm
         else:
-            # Deterministic dtype: bf16 only on CUDA, fp32 on CPU (for tests)
-            llm_dtype = torch.bfloat16 if cfg.device == "cuda" else torch.float32
+            llm_dtype = self._resolve_dtype(device=cfg.device, precision=cfg.precision)
             llm = Qwen2ForCausalLM.from_pretrained(
                 cfg.llm_name,
                 dtype=llm_dtype,
@@ -147,10 +169,6 @@ class LlenaModel(nn.Module):
         # Ensure projector dtype matches LLM embed dtype (important!)
         embed_dtype = self.llm.get_input_embeddings().weight.dtype  # pyright: ignore[reportCallIssue]
         self.projector.to(dtype=embed_dtype)  # pyright: ignore[reportCallIssue, reportArgumentType]
-
-        target_device = torch.device("cuda" if cfg.device == "cuda" else "cpu")
-        if cfg.device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("device='cuda' requested but CUDA is not available.")
 
         if cfg.qlora_enable:
             cast(nn.Module, self.vision).to(target_device)

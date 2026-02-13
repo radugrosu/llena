@@ -679,6 +679,7 @@ def run_eval(
         num_image_tokens=rc.mm.num_image_tokens,
         projector=rc.mm.projector,
         gradient_checkpointing=False,
+        precision=rc.train.precision,
         freeze_vision=True,
         freeze_llm=True,
         peft_enable=stage in {"lora", "qlora"},

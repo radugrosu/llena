@@ -291,6 +291,7 @@ def run_train(
         num_image_tokens=rc.mm.num_image_tokens,
         projector=rc.mm.projector,
         gradient_checkpointing=rc.train.gradient_checkpointing,
+        precision=rc.train.precision,
         freeze_vision=True,
         freeze_llm=freeze_llm,
         peft_enable=peft_enable,

@@ -292,7 +292,7 @@ class RunConfig:
         train = TrainConfig(
             seed=int(train_d["seed"]),
             device=device,  # type: ignore[arg-type]
-            precision=cast(Literal["bf16", "fp16"], precision),
+            precision=cast(Literal["bf16", "fp16", "fp32"], precision),
             batch_size=batch_size,
             micro_batch_size=micro_batch_size,
             grad_accum_steps=grad_accum_steps,
