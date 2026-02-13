@@ -63,9 +63,6 @@ class LlenaModel(nn.Module):
         self.cfg = cfg
         self.freeze_vision = bool(cfg.freeze_vision)
 
-        if cfg.peft_target_modules is None:
-            cfg.peft_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.llm_name)
         self.vision = SiglipVisionModel.from_pretrained(
             cfg.vision_name,
@@ -109,6 +106,9 @@ class LlenaModel(nn.Module):
             self.llm = llm
 
         if cfg.peft_enable:
+            if cfg.peft_target_modules is None:
+                cfg.peft_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
             for p in self.llm.parameters():
                 p.requires_grad = False
 
@@ -154,7 +154,7 @@ class LlenaModel(nn.Module):
 
         if cfg.qlora_enable:
             cast(nn.Module, self.vision).to(target_device)
-            self.projector = self.projector.to(target_device)
+            self.projector.to(target_device)
         else:
             self.to(target_device)
 

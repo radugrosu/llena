@@ -318,23 +318,14 @@ def run_train(
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
 
     ds = build_dataset(rc)
-
-    if rc.data.dataset in {"llava_instruct", "llava_textvqa"}:
-        collator = LlenaPackedCollator(
-            tokenizer=model.tokenizer,
-            image_processor=image_proc,
-            max_seq_len=rc.train.max_seq_len,
-            num_image_tokens=rc.mm.num_image_tokens,
-            pad_to_multiple_of=8,
-        )
-    else:
-        collator = LlenaCollator(
-            tokenizer=model.tokenizer,
-            image_processor=image_proc,
-            max_seq_len=rc.train.max_seq_len,
-            num_image_tokens=rc.mm.num_image_tokens,
-            pad_to_multiple_of=8,
-        )
+    collator_cls = LlenaPackedCollator if rc.data.dataset in {"llava_instruct", "llava_textvqa"} else LlenaCollator
+    collator = collator_cls(
+        tokenizer=model.tokenizer,
+        image_processor=image_proc,
+        max_seq_len=rc.train.max_seq_len,
+        num_image_tokens=rc.mm.num_image_tokens,
+        pad_to_multiple_of=8,
+    )
 
     dl = DataLoader(
         ds,
@@ -378,9 +369,7 @@ def run_train(
         target_micro_steps = (total_micro_steps // accum) * accum
         dropped_micro_steps = total_micro_steps - target_micro_steps
         if dropped_micro_steps > 0:
-            typer.echo(
-                f"train: dropping tail micro-batches ({dropped_micro_steps}) to keep full accumulation windows"
-            )
+            typer.echo(f"train: dropping tail micro-batches ({dropped_micro_steps}) to keep full accumulation windows")
         target_optim_steps = target_micro_steps // accum
     warmup_steps = int(target_optim_steps * warmup_ratio)
 
