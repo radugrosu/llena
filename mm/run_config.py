@@ -142,6 +142,7 @@ class LoggingConfig:
 class EvalConfig:
     max_samples: int
     batch_size: int
+    generate_batch_size_multiplier: int
     mode: Literal["teacher", "generate"] | None
     max_generated_tokens: int
 
@@ -332,12 +333,21 @@ class RunConfig:
         # --- Eval ---
         eval_d = d.get("eval")
         if eval_d is None:
-            eval_cfg = EvalConfig(max_samples=0, batch_size=1, mode=None, max_generated_tokens=256)
+            eval_cfg = EvalConfig(
+                max_samples=0,
+                batch_size=1,
+                generate_batch_size_multiplier=8,
+                mode=None,
+                max_generated_tokens=256,
+            )
         elif not isinstance(eval_d, dict):
             raise ValueError("eval must be a dict with max_samples, batch_size, and optional mode")
         else:
             if "batch_size" not in eval_d:
                 raise ValueError("eval.batch_size is required")
+            generate_batch_size_multiplier = int(eval_d.get("generate_batch_size_multiplier", 8))
+            if generate_batch_size_multiplier <= 0:
+                raise ValueError("eval.generate_batch_size_multiplier must be > 0")
             mode_raw = eval_d.get("mode")
             if mode_raw is None:
                 mode_val = None
@@ -350,6 +360,7 @@ class RunConfig:
             eval_cfg = EvalConfig(
                 max_samples=int(eval_d.get("max_samples", 0)),
                 batch_size=int(eval_d["batch_size"]),
+                generate_batch_size_multiplier=generate_batch_size_multiplier,
                 mode=cast(Literal["teacher", "generate"] | None, mode_val),
                 max_generated_tokens=int(eval_d.get("max_generated_tokens", 256)),
             )

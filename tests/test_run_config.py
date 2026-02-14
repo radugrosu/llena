@@ -1,4 +1,5 @@
 from mm.run_config import RunConfig
+import pytest
 
 
 def _base_cfg() -> dict:
@@ -58,3 +59,19 @@ def test_run_name_auto_from_config() -> None:
     cfg["data"]["split"] = "validation"
     rc = RunConfig.from_dict(cfg)
     assert rc.project.run_name == "textvqa_validation_qwen2.5-0.5b_siglip224"
+
+
+def test_eval_generate_batch_size_multiplier_defaults_and_validation() -> None:
+    cfg = _base_cfg()
+    rc = RunConfig.from_dict(cfg)
+    assert rc.eval.generate_batch_size_multiplier == 8
+
+    cfg = _base_cfg()
+    cfg["eval"]["generate_batch_size_multiplier"] = 12
+    rc = RunConfig.from_dict(cfg)
+    assert rc.eval.generate_batch_size_multiplier == 12
+
+    cfg = _base_cfg()
+    cfg["eval"]["generate_batch_size_multiplier"] = 0
+    with pytest.raises(ValueError, match="eval.generate_batch_size_multiplier must be > 0"):
+        RunConfig.from_dict(cfg)

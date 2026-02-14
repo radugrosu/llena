@@ -723,19 +723,26 @@ def run_eval(
     use_amp = device.type == "cuda" and rc.train.precision in {"bf16", "fp16"}
     amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
 
+    if eval_mode is None:
+        eval_mode = rc.eval.mode or "generate"
+
     typer.echo("eval: loading image processor")
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
     if batch_size is None:
-        batch_size = rc.eval.batch_size
+        if eval_mode == "generate":
+            batch_size = rc.eval.batch_size * rc.eval.generate_batch_size_multiplier
+            typer.echo(
+                "eval: using generate batch size from multiplier "
+                f"({rc.eval.batch_size} x {rc.eval.generate_batch_size_multiplier}) = {batch_size}"
+            )
+        else:
+            batch_size = rc.eval.batch_size
     if max_samples is None:
         max_samples = rc.train.eval_max_samples if rc.train.eval_max_samples > 0 else rc.eval.max_samples
         typer.echo(f"eval: max_samples from config = {max_samples}")
 
     typer.echo(f"eval: building dataset split={rc.data.split} max_samples={max_samples}")
     ds = build_dataset(rc, max_samples=max_samples)
-
-    if eval_mode is None:
-        eval_mode = rc.eval.mode or "generate"
 
     if eval_mode == "teacher":
         collator = LlenaCollator(
