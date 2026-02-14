@@ -17,7 +17,7 @@ dependencies = [
   "pyyaml>=5.3.1",
   "rich>=14.2.0",
   "safetensors>=0.7.0",
-  "torch>=2.9.1",
+  "torch>=2.10.0",
   "torchvision>=0.2.0",
   "tqdm>=4.67.1",
   "transformers==5.1.0",
@@ -26,18 +26,17 @@ dependencies = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
-torchaudio = { index = "pytorch-cu126" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 [dependency-groups]
 dev = ["ipython>=9.9.0", "pyright>=1.1.408", "pytest>=9.0.2"]
-flash = ["flash-attn>=2.7.4"]
+flash = ["flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3+cu128torch2.10-cp313-cp313-linux_x86_64.whl"]
 
 [tool.ruff]
 line-length = 120
