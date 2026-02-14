@@ -5,11 +5,11 @@ paths:
   reports_dir: reports
   cache_dir: ${HF_HOME:-.cache/huggingface}
 model:
-  llm_name: Qwen/Qwen2.5-0.5B-Instruct
-  vision_name: google/siglip-base-patch16-224
+  llm_name: Qwen/Qwen2.5-1.5B-Instruct
+  vision_name: google/siglip-large-patch16-384
   llm_revision: null
   vision_revision: null
-  attn_implementation: sdpa
+  attn_implementation: flash_attention_2
 mm:
   projector: mlp2
 train:
@@ -24,7 +24,7 @@ train:
   max_seq_len: 1024
   epochs: 1
   batch_size: 256
-  micro_batch_size: 4
+  micro_batch_size: 32
   log_every: 10
   eval_every: 50
   save_every: 50
@@ -42,5 +42,5 @@ logging:
   wandb_project: llena
 eval:
   mode: teacher
-  batch_size: 4
+  batch_size: 16
   max_generated_tokens: 256
