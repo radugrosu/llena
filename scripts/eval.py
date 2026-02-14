@@ -348,6 +348,7 @@ def _generate_batch(
             [{"role": "user", "content": question}],
             add_generation_prompt=True,
             tokenize=True,
+            return_dict=False,
             return_tensors=None,
         )
         prompt_ids.append(ids)

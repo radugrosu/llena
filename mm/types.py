@@ -48,6 +48,7 @@ class ChatTokenizer(Protocol):
         *,
         add_generation_prompt: bool,
         tokenize: bool,
+        return_dict: bool = False,
         return_tensors: None = None,
     ) -> list[int]: ...
 

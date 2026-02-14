@@ -32,6 +32,7 @@ def _encode_chat_sft(
         [{"role": "user", "content": question}],
         add_generation_prompt=True,
         tokenize=True,
+        return_dict=False,
         return_tensors=None,
     )
     full_ids = tokenizer.apply_chat_template(
@@ -41,6 +42,7 @@ def _encode_chat_sft(
         ],
         add_generation_prompt=False,
         tokenize=True,
+        return_dict=False,
         return_tensors=None,
     )
 
@@ -67,6 +69,7 @@ def _encode_chat_packed(
         conversation,
         add_generation_prompt=False,
         tokenize=True,
+        return_dict=False,
         return_tensors=None,
     )
     labels = [-100] * len(full_ids)
@@ -82,12 +85,14 @@ def _encode_chat_packed(
             prefix,
             add_generation_prompt=True,
             tokenize=True,
+            return_dict=False,
             return_tensors=None,
         )
         ids_up_to = tokenizer.apply_chat_template(
             conversation[: idx + 1],
             add_generation_prompt=False,
             tokenize=True,
+            return_dict=False,
             return_tensors=None,
         )
         if ids_up_to[: len(ids_before)] != ids_before:

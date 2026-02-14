@@ -118,7 +118,7 @@ class LlenaModel(nn.Module):
             llm_dtype = self._resolve_dtype(device=cfg.device, precision=cfg.precision)
             llm = Qwen2ForCausalLM.from_pretrained(
                 cfg.llm_name,
-                dtype=llm_dtype,
+                torch_dtype=llm_dtype,
                 attn_implementation=cfg.attn_implementation,
             )
             if cfg.gradient_checkpointing:
