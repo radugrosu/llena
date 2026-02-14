@@ -385,7 +385,6 @@ def _generate_batch(
             do_sample=False,
             num_beams=1,
             max_new_tokens=max_generated_tokens,
-            temperature=0.0,
             repetition_penalty=repetition_penalty,
             pad_token_id=pad_id,
             eos_token_id=tokenizer.eos_token_id,
