@@ -23,7 +23,7 @@ echo "stage1: latest run=$RUN1 ckpt=$CKPT1"
 echo "stage1: eval (sharegpt4v_coco validation)"
 uv run python -m scripts.eval \
   --ckpt "$CKPT1" \
-  --override data.split=validation
+  --split validation
 
 ## ===========================================================================
 echo "stage1: eval (textvqa validation)"
@@ -31,6 +31,13 @@ uv run python -m scripts.eval \
   --ckpt "$CKPT1" \
   --dataset textvqa \
   --split validation
+
+echo "stage1: final eval (textvqa validation, generate)"
+uv run python -m scripts.eval \
+  --ckpt "$CKPT1" \
+  --dataset textvqa \
+  --split validation \
+  --eval-mode generate
 
 ## ===========================================================================
 if [[ -f artifacts/latest_stage2.txt ]]; then
@@ -54,3 +61,10 @@ uv run python -m scripts.eval \
   --ckpt "$CKPT2" \
   --dataset textvqa \
   --split validation
+
+echo "stage2: final eval (textvqa validation, generate)"
+uv run python -m scripts.eval \
+  --ckpt "$CKPT2" \
+  --dataset textvqa \
+  --split validation \
+  --eval-mode generate

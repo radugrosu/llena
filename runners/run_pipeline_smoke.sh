@@ -33,6 +33,14 @@ uv run python -m scripts.eval \
   --split validation \
   --eval-samples-path datasets/samples.json
 
+echo "stage1: final eval (textvqa validation, generate)"
+uv run python -m scripts.eval \
+  --ckpt "$CKPT1" \
+  --dataset textvqa \
+  --split validation \
+  --eval-mode generate \
+  --eval-samples-path datasets/samples.json
+
 ## ===========================================================================
 if [[ -f artifacts/latest_stage2.txt ]]; then
   RUN2=$(cat artifacts/latest_stage2.txt)
@@ -54,4 +62,12 @@ uv run python -m scripts.eval \
   --ckpt "$CKPT2" \
   --dataset textvqa \
   --split validation \
+  --eval-samples-path datasets/samples.json
+
+echo "stage2: final eval (textvqa validation, generate)"
+uv run python -m scripts.eval \
+  --ckpt "$CKPT2" \
+  --dataset textvqa \
+  --split validation \
+  --eval-mode generate \
   --eval-samples-path datasets/samples.json
