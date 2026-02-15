@@ -580,6 +580,9 @@ def _log_eval_samples(
     use_amp: bool,
     amp_dtype: torch.dtype,
     batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
     max_generated_tokens: int,
     repetition_penalty: float,
     ckpt_step: int,
@@ -601,7 +604,9 @@ def _log_eval_samples(
         batch_size=batch_size,
         shuffle=False,
         collate_fn=lambda b: _collate_eval_generate_with_images(image_proc, b),
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
     )
 
     with torch.no_grad():
@@ -758,7 +763,9 @@ def run_eval(
             batch_size=batch_size,
             shuffle=False,
             collate_fn=lambda b: _collate_eval_teacher(collator, b),
-            num_workers=0,
+            num_workers=rc.eval.num_workers,
+            pin_memory=rc.eval.pin_memory,
+            persistent_workers=rc.eval.persistent_workers,
         )
 
         typer.echo("eval: starting eval loop (teacher)")
@@ -777,7 +784,9 @@ def run_eval(
             batch_size=batch_size,
             shuffle=False,
             collate_fn=lambda b: _collate_eval_generate(image_proc, b),
-            num_workers=0,
+            num_workers=rc.eval.num_workers,
+            pin_memory=rc.eval.pin_memory,
+            persistent_workers=rc.eval.persistent_workers,
         )
 
         typer.echo("eval: starting eval loop (generate)")
@@ -815,6 +824,9 @@ def run_eval(
             use_amp=use_amp,
             amp_dtype=amp_dtype,
             batch_size=batch_size,
+            num_workers=rc.eval.num_workers,
+            pin_memory=rc.eval.pin_memory,
+            persistent_workers=rc.eval.persistent_workers,
             max_generated_tokens=rc.eval.max_generated_tokens,
             repetition_penalty=1.0,
             ckpt_step=ckpt_step,

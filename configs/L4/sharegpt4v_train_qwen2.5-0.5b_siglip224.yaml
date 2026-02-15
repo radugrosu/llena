@@ -9,7 +9,7 @@ model:
   vision_name: google/siglip-base-patch16-224
   llm_revision: null
   vision_revision: null
-  attn_implementation: sdpa
+  attn_implementation: flash_attention_2
 mm:
   projector: mlp2
 train:
@@ -24,7 +24,10 @@ train:
   max_seq_len: 1024
   epochs: 1
   batch_size: 256
-  micro_batch_size: 4
+  micro_batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: false
   log_every: 10
   eval_every: 50
   save_every: 50
@@ -43,4 +46,7 @@ logging:
 eval:
   mode: teacher
   batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: false
   max_generated_tokens: 256

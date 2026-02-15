@@ -65,6 +65,12 @@ def test_eval_generate_batch_size_multiplier_defaults_and_validation() -> None:
     cfg = _base_cfg()
     rc = RunConfig.from_dict(cfg)
     assert rc.eval.generate_batch_size_multiplier == 8
+    assert rc.train.num_workers == 4
+    assert rc.train.pin_memory is True
+    assert rc.train.persistent_workers is False
+    assert rc.eval.num_workers == 4
+    assert rc.eval.pin_memory is True
+    assert rc.eval.persistent_workers is False
 
     cfg = _base_cfg()
     cfg["eval"]["generate_batch_size_multiplier"] = 12
@@ -74,4 +80,34 @@ def test_eval_generate_batch_size_multiplier_defaults_and_validation() -> None:
     cfg = _base_cfg()
     cfg["eval"]["generate_batch_size_multiplier"] = 0
     with pytest.raises(ValueError, match="eval.generate_batch_size_multiplier must be > 0"):
+        RunConfig.from_dict(cfg)
+
+
+def test_dataloader_worker_fields_parse_and_validate() -> None:
+    cfg = _base_cfg()
+    cfg["train"]["num_workers"] = 4
+    cfg["train"]["pin_memory"] = True
+    cfg["train"]["persistent_workers"] = True
+    cfg["eval"]["num_workers"] = 2
+    cfg["eval"]["pin_memory"] = True
+    cfg["eval"]["persistent_workers"] = True
+
+    rc = RunConfig.from_dict(cfg)
+    assert rc.train.num_workers == 4
+    assert rc.train.pin_memory is True
+    assert rc.train.persistent_workers is True
+    assert rc.eval.num_workers == 2
+    assert rc.eval.pin_memory is True
+    assert rc.eval.persistent_workers is True
+
+    cfg = _base_cfg()
+    cfg["train"]["num_workers"] = 0
+    cfg["train"]["persistent_workers"] = True
+    with pytest.raises(ValueError, match="train.persistent_workers requires train.num_workers > 0"):
+        RunConfig.from_dict(cfg)
+
+    cfg = _base_cfg()
+    cfg["eval"]["num_workers"] = 0
+    cfg["eval"]["persistent_workers"] = True
+    with pytest.raises(ValueError, match="eval.persistent_workers requires eval.num_workers > 0"):
         RunConfig.from_dict(cfg)

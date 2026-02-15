@@ -25,6 +25,9 @@ train:
   epochs: 1
   batch_size: 256
   micro_batch_size: 32
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: false
   log_every: 10
   eval_every: 50
   save_every: 50
@@ -43,4 +46,7 @@ logging:
 eval:
   mode: teacher
   batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: false
   max_generated_tokens: 256

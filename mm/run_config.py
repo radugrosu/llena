@@ -106,6 +106,9 @@ class TrainConfig:
     eval_every: int
     eval_max_samples: int
     max_grad_norm: float
+    num_workers: int
+    pin_memory: bool
+    persistent_workers: bool
 
     gradient_checkpointing: bool
 
@@ -142,6 +145,9 @@ class LoggingConfig:
 class EvalConfig:
     max_samples: int
     batch_size: int
+    num_workers: int
+    pin_memory: bool
+    persistent_workers: bool
     generate_batch_size_multiplier: int
     mode: Literal["teacher", "generate"] | None
     max_generated_tokens: int
@@ -274,11 +280,14 @@ class RunConfig:
 
         batch_size = int(train_d["batch_size"])
         micro_batch_size = int(train_d["micro_batch_size"])
-        if batch_size <= 0 or micro_batch_size <= 0:
-            raise ValueError("train.batch_size and train.micro_batch_size must be > 0")
         if batch_size % micro_batch_size != 0:
             raise ValueError("train.batch_size must be divisible by train.micro_batch_size")
         grad_accum_steps = batch_size // micro_batch_size
+        num_workers = int(train_d.get("num_workers", 4))
+        pin_memory = bool(train_d.get("pin_memory", True))
+        persistent_workers = bool(train_d.get("persistent_workers", False))
+        if persistent_workers and num_workers == 0:
+            raise ValueError("train.persistent_workers requires train.num_workers > 0")
 
         lr_schedule = str(train_d.get("lr_schedule", "")).lower()
         if lr_schedule != "cosine":
@@ -305,6 +314,9 @@ class RunConfig:
             eval_every=int(train_d.get("eval_every", 0)),
             eval_max_samples=int(train_d.get("eval_max_samples", 0)),
             max_grad_norm=float(train_d["max_grad_norm"]),
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
             gradient_checkpointing=bool(train_d["gradient_checkpointing"]),
             lr=float(train_d["lr"]),
             lr_schedule="cosine",
@@ -336,6 +348,9 @@ class RunConfig:
             eval_cfg = EvalConfig(
                 max_samples=0,
                 batch_size=1,
+                num_workers=4,
+                pin_memory=True,
+                persistent_workers=False,
                 generate_batch_size_multiplier=8,
                 mode=None,
                 max_generated_tokens=256,
@@ -345,6 +360,11 @@ class RunConfig:
         else:
             if "batch_size" not in eval_d:
                 raise ValueError("eval.batch_size is required")
+            eval_num_workers = int(eval_d.get("num_workers", 4))
+            eval_pin_memory = bool(eval_d.get("pin_memory", True))
+            eval_persistent_workers = bool(eval_d.get("persistent_workers", False))
+            if eval_persistent_workers and eval_num_workers == 0:
+                raise ValueError("eval.persistent_workers requires eval.num_workers > 0")
             generate_batch_size_multiplier = int(eval_d.get("generate_batch_size_multiplier", 8))
             if generate_batch_size_multiplier <= 0:
                 raise ValueError("eval.generate_batch_size_multiplier must be > 0")
@@ -360,6 +380,9 @@ class RunConfig:
             eval_cfg = EvalConfig(
                 max_samples=int(eval_d.get("max_samples", 0)),
                 batch_size=int(eval_d["batch_size"]),
+                num_workers=eval_num_workers,
+                pin_memory=eval_pin_memory,
+                persistent_workers=eval_persistent_workers,
                 generate_batch_size_multiplier=generate_batch_size_multiplier,
                 mode=cast(Literal["teacher", "generate"] | None, mode_val),
                 max_generated_tokens=int(eval_d.get("max_generated_tokens", 256)),

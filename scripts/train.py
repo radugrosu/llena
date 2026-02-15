@@ -408,7 +408,9 @@ def run_train(
         batch_size=rc.train.micro_batch_size,
         shuffle=True,
         collate_fn=collator,
-        num_workers=0,
+        num_workers=rc.train.num_workers,
+        pin_memory=rc.train.pin_memory,
+        persistent_workers=rc.train.persistent_workers,
     )
 
     eval_every = rc.train.eval_every
@@ -421,7 +423,9 @@ def run_train(
             batch_size=rc.train.micro_batch_size,
             shuffle=False,
             collate_fn=collator,
-            num_workers=0,
+            num_workers=rc.train.num_workers,
+            pin_memory=rc.train.pin_memory,
+            persistent_workers=rc.train.persistent_workers,
         )
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
