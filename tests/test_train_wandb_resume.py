@@ -125,3 +125,78 @@ def test_should_resume_wandb_run(
         )
         == expected
     )
+
+
+def test_checkpoint_run_mode_message_fresh() -> None:
+    assert (
+        train_script.checkpoint_run_mode_message(
+            resume_ckpt_path=None,
+            start_step=0,
+            ckpt_stage=None,
+            stage_transition=False,
+        )
+        == "ckpt: run_mode=new resume_checkpoint=none"
+    )
+
+
+def test_checkpoint_run_mode_message_resumed() -> None:
+    assert (
+        train_script.checkpoint_run_mode_message(
+            resume_ckpt_path=Path("artifacts/run/step_100/ckpt.pt"),
+            start_step=100,
+            ckpt_stage="lora",
+            stage_transition=False,
+        )
+        == "ckpt: run_mode=resumed resume_checkpoint=artifacts/run/step_100/ckpt.pt start_step=100 ckpt_stage=lora"
+    )
+
+
+def test_checkpoint_run_mode_message_stage_transition() -> None:
+    assert (
+        train_script.checkpoint_run_mode_message(
+            resume_ckpt_path=Path("artifacts/run/step_100/ckpt.pt"),
+            start_step=0,
+            ckpt_stage="projector",
+            stage_transition=True,
+        )
+        == "ckpt: run_mode=new_from_checkpoint "
+        "resume_checkpoint=artifacts/run/step_100/ckpt.pt reason=stage_transition ckpt_stage=projector start_step=0"
+    )
+
+
+def test_wandb_run_mode_message_resumed() -> None:
+    assert (
+        train_script.wandb_run_mode_message(
+            should_resume=True,
+            resume_wandb_id="run_123",
+            stage_transition=False,
+            policy="auto",
+        )
+        == "wandb: run_mode=resumed existing_run_id=run_123 policy=auto"
+    )
+
+
+@pytest.mark.parametrize(
+    ("resume_id", "stage_transition", "policy", "expected_reason"),
+    [
+        (None, False, "auto", "no_existing_run_id"),
+        ("run_123", False, "never", "policy_never"),
+        ("run_123", True, "auto", "stage_transition_auto"),
+        ("run_123", False, "auto", "resume_disabled"),
+    ],
+)
+def test_wandb_run_mode_message_new_reasons(
+    resume_id: str | None,
+    stage_transition: bool,
+    policy: train_script.WandbResumePolicy,
+    expected_reason: str,
+) -> None:
+    assert (
+        train_script.wandb_run_mode_message(
+            should_resume=False,
+            resume_wandb_id=resume_id,
+            stage_transition=stage_transition,
+            policy=policy,
+        )
+        == f"wandb: run_mode=new reason={expected_reason} policy={policy}"
+    )

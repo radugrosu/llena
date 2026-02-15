@@ -284,6 +284,46 @@ def should_resume_wandb_run(
     return not stage_transition
 
 
+def checkpoint_run_mode_message(
+    *,
+    resume_ckpt_path: Path | None,
+    start_step: int,
+    ckpt_stage: str | None,
+    stage_transition: bool,
+) -> str:
+    if resume_ckpt_path is None:
+        return "ckpt: run_mode=new resume_checkpoint=none"
+    if stage_transition:
+        return (
+            "ckpt: run_mode=new_from_checkpoint "
+            f"resume_checkpoint={resume_ckpt_path} reason=stage_transition ckpt_stage={ckpt_stage} start_step=0"
+        )
+    return (
+        "ckpt: run_mode=resumed "
+        f"resume_checkpoint={resume_ckpt_path} start_step={start_step} ckpt_stage={ckpt_stage}"
+    )
+
+
+def wandb_run_mode_message(
+    *,
+    should_resume: bool,
+    resume_wandb_id: str | None,
+    stage_transition: bool,
+    policy: WandbResumePolicy,
+) -> str:
+    if should_resume and resume_wandb_id is not None:
+        return f"wandb: run_mode=resumed existing_run_id={resume_wandb_id} policy={policy}"
+    if resume_wandb_id is None:
+        reason = "no_existing_run_id"
+    elif policy == "never":
+        reason = "policy_never"
+    elif policy == "auto" and stage_transition:
+        reason = "stage_transition_auto"
+    else:
+        reason = "resume_disabled"
+    return f"wandb: run_mode=new reason={reason} policy={policy}"
+
+
 def run_train(
     *,
     config: str,
@@ -436,6 +476,8 @@ def run_train(
     resume_wandb_id: str | None = None
     resume_wandb_project: str | None = None
     resume_stage_transition = False
+    resume_ckpt_path: Path | None = None
+    ckpt_stage: str | None = None
     if resume is not None:
         ckpt_path = Path(resume)
         if ckpt_path.is_dir():
@@ -455,13 +497,21 @@ def run_train(
                 ckpt_path = ckpt_path / "ckpt.pt"
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
+        resume_ckpt_path = ckpt_path
         start_step, ckpt_stage, resume_wandb_id, resume_wandb_project, resume_stage_transition = load_ckpt(
             ckpt_path, model, optm, device, expected_stage=stage
         )
-        typer.echo(f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})")
         if start_step > 0:
             scheduler.last_epoch = start_step - 1
             global_step = start_step
+    typer.echo(
+        checkpoint_run_mode_message(
+            resume_ckpt_path=resume_ckpt_path,
+            start_step=start_step,
+            ckpt_stage=ckpt_stage,
+            stage_transition=resume_stage_transition,
+        )
+    )
 
     wandb_run_id: str | None = None
     wandb_project: str | None = None
@@ -471,9 +521,16 @@ def run_train(
             stage_transition=resume_stage_transition,
             policy=resume_policy,
         )
+        typer.echo(
+            wandb_run_mode_message(
+                should_resume=should_resume_wandb,
+                resume_wandb_id=resume_wandb_id,
+                stage_transition=resume_stage_transition,
+                policy=resume_policy,
+            )
+        )
         if should_resume_wandb and resume_wandb_id is not None:
             project_name = resume_wandb_project or rc.project.name
-            typer.echo(f"wandb: resuming existing run id={resume_wandb_id} (policy={resume_policy})")
             wandb.init(
                 id=resume_wandb_id,
                 resume="allow",
@@ -482,14 +539,11 @@ def run_train(
                 config=raw_cfg,
             )
         else:
-            if resume_wandb_id is not None and resume_policy == "auto" and resume_stage_transition:
-                typer.echo("wandb: stage transition resume detected; starting a new run (policy=auto)")
-            elif resume_wandb_id is not None and resume_policy == "never":
-                typer.echo("wandb: checkpoint has run id but policy=never; starting a new run")
             wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
         if wandb.run is not None:
             wandb_run_id = wandb.run.id
             wandb_project = wandb.run.project
+            typer.echo(f"wandb: active_run id={wandb_run_id} project={wandb_project}")
         wandb.define_metric("global_step", hidden=True)
         wandb.define_metric("train/*", step_metric="global_step")
         wandb.define_metric("val/*", step_metric="global_step")
