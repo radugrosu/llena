@@ -5,6 +5,7 @@ import json
 import math
 import time
 from pathlib import Path
+from typing import Literal
 
 import torch
 import typer
@@ -21,6 +22,9 @@ from mm.config import load_config, save_resolved_config
 from mm.model import LlenaModel, LlenaModelConfig
 from mm.run_config import RunConfig, Stage
 from scripts.utils import get_git_commit
+
+WandbResumePolicy = Literal["auto", "always", "never"]
+WANDB_RESUME_POLICIES: frozenset[WandbResumePolicy] = frozenset({"auto", "always", "never"})
 
 
 def opt(default: object, help: str):
@@ -213,12 +217,13 @@ def load_ckpt(
     device: torch.device,
     *,
     expected_stage: Stage | None = None,
-) -> tuple[int, str, str | None, str | None]:
+) -> tuple[int, str, str | None, str | None, bool]:
     ckpt = torch.load(ckpt_path, map_location=device)
     step = int(ckpt["step"])
     stage = str(ckpt["stage"])
     wandb_run_id = ckpt.get("wandb_run_id") if isinstance(ckpt.get("wandb_run_id"), str) else None
     wandb_project = ckpt.get("wandb_project") if isinstance(ckpt.get("wandb_project"), str) else None
+    stage_transition = False
 
     if "model" in ckpt:
         model.load_state_dict(ckpt["model"], strict=True)
@@ -236,19 +241,47 @@ def load_ckpt(
         if stage == "projector" and expected_stage in stage2:
             typer.echo(f"ckpt: stage transition (ckpt_stage={stage} -> expected={expected_stage}); skipping optimizer")
             step = 0
+            stage_transition = True
         elif stage in stage2 and expected_stage in stage2:
             typer.echo(
                 f"ckpt: stage transition (ckpt_stage={stage} -> expected={expected_stage}); "
                 "skipping optimizer (assume new stage2 data)"
             )
             step = 0
+            stage_transition = True
         else:
             raise ValueError(f"ckpt: stage mismatch (ckpt_stage={stage} expected={expected_stage})")
     elif "optimizer" in ckpt:
         optm.load_state_dict(ckpt["optimizer"])
 
     typer.echo(f"ckpt: loaded {ckpt_path}")
-    return step, stage, wandb_run_id, wandb_project
+    return step, stage, wandb_run_id, wandb_project, stage_transition
+
+
+def parse_wandb_resume_policy(policy_raw: str) -> WandbResumePolicy:
+    policy = policy_raw.strip().lower()
+    if policy not in WANDB_RESUME_POLICIES:
+        raise ValueError(f"wandb_resume_policy must be auto|always|never, got: {policy_raw}")
+    if policy == "auto":
+        return "auto"
+    if policy == "always":
+        return "always"
+    return "never"
+
+
+def should_resume_wandb_run(
+    *,
+    resume_wandb_id: str | None,
+    stage_transition: bool,
+    policy: WandbResumePolicy,
+) -> bool:
+    if resume_wandb_id is None:
+        return False
+    if policy == "always":
+        return True
+    if policy == "never":
+        return False
+    return not stage_transition
 
 
 def run_train(
@@ -259,6 +292,7 @@ def run_train(
     resume: str | None = None,
     save_every: int | None = None,
     save_trainable_only: bool = True,
+    wandb_resume_policy: str = "auto",
     override: list[str] | None = None,
 ) -> None:
     overrides = override or []
@@ -266,6 +300,7 @@ def run_train(
     commit = get_git_commit()
     raw_cfg = load_config(config, overrides=overrides)
     rc = RunConfig.from_dict(raw_cfg)
+    resume_policy = parse_wandb_resume_policy(wandb_resume_policy)
     raw_cfg["project"]["run_name"] = rc.project.run_name  # pyright: ignore[reportIndexIssue]
 
     stage = rc.train.stage_name
@@ -400,6 +435,7 @@ def run_train(
     global_step = 0
     resume_wandb_id: str | None = None
     resume_wandb_project: str | None = None
+    resume_stage_transition = False
     if resume is not None:
         ckpt_path = Path(resume)
         if ckpt_path.is_dir():
@@ -419,7 +455,7 @@ def run_train(
                 ckpt_path = ckpt_path / "ckpt.pt"
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
-        start_step, ckpt_stage, resume_wandb_id, resume_wandb_project = load_ckpt(
+        start_step, ckpt_stage, resume_wandb_id, resume_wandb_project, resume_stage_transition = load_ckpt(
             ckpt_path, model, optm, device, expected_stage=stage
         )
         typer.echo(f"resumed from {ckpt_path} at step={start_step} (ckpt_stage={ckpt_stage})")
@@ -430,8 +466,14 @@ def run_train(
     wandb_run_id: str | None = None
     wandb_project: str | None = None
     if rc.logging.backend == "wandb":
-        if resume_wandb_id is not None:
+        should_resume_wandb = should_resume_wandb_run(
+            resume_wandb_id=resume_wandb_id,
+            stage_transition=resume_stage_transition,
+            policy=resume_policy,
+        )
+        if should_resume_wandb and resume_wandb_id is not None:
             project_name = resume_wandb_project or rc.project.name
+            typer.echo(f"wandb: resuming existing run id={resume_wandb_id} (policy={resume_policy})")
             wandb.init(
                 id=resume_wandb_id,
                 resume="allow",
@@ -440,6 +482,10 @@ def run_train(
                 config=raw_cfg,
             )
         else:
+            if resume_wandb_id is not None and resume_policy == "auto" and resume_stage_transition:
+                typer.echo("wandb: stage transition resume detected; starting a new run (policy=auto)")
+            elif resume_wandb_id is not None and resume_policy == "never":
+                typer.echo("wandb: checkpoint has run id but policy=never; starting a new run")
             wandb.init(project=rc.project.name, name=rc.project.run_name, config=raw_cfg)
         if wandb.run is not None:
             wandb_run_id = wandb.run.id
@@ -591,6 +637,10 @@ def main(
     resume: str | None = opt(None, "Path to a ckpt.pt or a step_* directory to resume from"),
     save_every: int | None = opt(None, "Override train.save_every (int). If None, use config."),
     save_trainable_only: bool = opt(True, "If true, saves only projector/adapters for PEFT stages."),
+    wandb_resume_policy: str = opt(
+        "auto",
+        "W&B resume behavior: auto (same-stage only), always, or never.",
+    ),
     override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)"),
 ) -> None:
     run_train(
@@ -600,6 +650,7 @@ def main(
         resume=resume,
         save_every=save_every,
         save_trainable_only=save_trainable_only,
+        wandb_resume_policy=wandb_resume_policy,
         override=override,
     )
 
