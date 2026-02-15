@@ -417,10 +417,15 @@ def run_train(
     eval_max_samples = rc.train.eval_max_samples
     val_dl: DataLoader | None = None
     if eval_every > 0:
+        val_batch_size = min(rc.train.micro_batch_size, rc.eval.batch_size)
+        typer.echo(
+            "val: batch_size="
+            f"{val_batch_size} (train.micro_batch_size={rc.train.micro_batch_size}, eval.batch_size={rc.eval.batch_size})"
+        )
         val_ds = build_dataset(rc, split="validation", max_samples=eval_max_samples or None)
         val_dl = DataLoader(
             val_ds,
-            batch_size=rc.train.micro_batch_size,
+            batch_size=val_batch_size,
             shuffle=False,
             collate_fn=collator,
             num_workers=rc.train.num_workers,
