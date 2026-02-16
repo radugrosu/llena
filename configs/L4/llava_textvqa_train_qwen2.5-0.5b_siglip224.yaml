@@ -16,6 +16,7 @@ train:
   seed: 42
   device: cuda
   precision: bf16
+  liger_kernel: true
   gradient_checkpointing: true
   weight_decay: 0.0
   warmup_ratio: 0.03
@@ -24,7 +25,7 @@ train:
   max_seq_len: 1536
   epochs: 1
   batch_size: 128
-  micro_batch_size: 1
+  micro_batch_size: 4
   num_workers: 4
   pin_memory: true
   persistent_workers: false

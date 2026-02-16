@@ -375,6 +375,7 @@ def run_train(
         peft_dropout=rc.train.lora_dropout or 0.0,
         peft_target_modules=list(rc.train.lora_targets or ()),
         qlora_enable=qlora_enable,
+        liger_kernel=rc.train.liger_kernel,
         device="cuda" if device.type == "cuda" else "cpu",
     )
 

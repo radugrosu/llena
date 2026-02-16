@@ -65,6 +65,7 @@ def test_eval_generate_batch_size_multiplier_defaults_and_validation() -> None:
     cfg = _base_cfg()
     rc = RunConfig.from_dict(cfg)
     assert rc.eval.generate_batch_size_multiplier == 8
+    assert rc.train.liger_kernel is False
     assert rc.train.num_workers == 4
     assert rc.train.pin_memory is True
     assert rc.train.persistent_workers is False
@@ -81,6 +82,13 @@ def test_eval_generate_batch_size_multiplier_defaults_and_validation() -> None:
     cfg["eval"]["generate_batch_size_multiplier"] = 0
     with pytest.raises(ValueError, match="eval.generate_batch_size_multiplier must be > 0"):
         RunConfig.from_dict(cfg)
+
+
+def test_train_liger_kernel_parse() -> None:
+    cfg = _base_cfg()
+    cfg["train"]["liger_kernel"] = True
+    rc = RunConfig.from_dict(cfg)
+    assert rc.train.liger_kernel is True
 
 
 def test_dataloader_worker_fields_parse_and_validate() -> None:

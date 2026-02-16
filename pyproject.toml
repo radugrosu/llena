@@ -7,22 +7,23 @@ requires-python = "==3.13.*"
 dependencies = [
   "accelerate>=1.12.0",
   "bitsandbytes>=0.49.1",
-  "datasets>=4.4.2",
+  "datasets>=4.5.0",
   "python-dotenv>=1.1.1",
   "evaluate>=0.4.6",
   "gradio>=6.3.0",
-  "numpy>=2.4.1",
+  "liger-kernel>=0.7.0",
+  "numpy>=2.4.2",
   "peft>=0.18.1",
-  "pillow>=12.1.0",
+  "pillow>=12.1.1",
   "pyyaml>=5.3.1",
   "rich>=14.2.0",
   "safetensors>=0.7.0",
   "torch>=2.10.0",
-  "torchvision>=0.2.0",
-  "tqdm>=4.67.1",
+  "torchvision>=0.25.0",
+  "tqdm>=4.67.3",
   "transformers==5.1.0",
-  "typer>=0.21.1",
-  "wandb>=0.23.1",
+  "typer>=0.23.1",
+  "wandb>=0.25",
 ]
 
 [[tool.uv.index]]
@@ -36,7 +37,9 @@ torchvision = { index = "pytorch-cu128" }
 
 [dependency-groups]
 dev = ["ipython>=9.9.0", "pyright>=1.1.408", "pytest>=9.0.2"]
-flash = ["flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3+cu128torch2.10-cp313-cp313-linux_x86_64.whl"]
+flash = [
+  "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3+cu128torch2.10-cp313-cp313-linux_x86_64.whl",
+]
 
 [tool.ruff]
 line-length = 120

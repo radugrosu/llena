@@ -16,6 +16,12 @@ from mm.projectors import build_projector
 from mm.types import ChatTokenizer
 
 
+def _apply_liger_kernel_to_qwen2() -> None:
+    from liger_kernel.transformers import apply_liger_kernel_to_qwen2
+
+    apply_liger_kernel_to_qwen2()
+
+
 def _select_or_pad_tokens(tokens: torch.Tensor, num_tokens: int) -> torch.Tensor:
     if num_tokens <= 0:
         raise ValueError("num_tokens must be > 0")
@@ -44,6 +50,7 @@ class LlenaModelConfig:
     peft_dropout: float = 0.05
     peft_target_modules: list[str] | None = None
     qlora_enable: bool = False
+    liger_kernel: bool = False
 
 
 class LlenaModel(nn.Module):
@@ -90,6 +97,8 @@ class LlenaModel(nn.Module):
             cfg.vision_name,
             attn_implementation=cfg.attn_implementation,
         )
+        if cfg.liger_kernel:
+            _apply_liger_kernel_to_qwen2()
 
         if cfg.qlora_enable:
             if cfg.device != "cuda":

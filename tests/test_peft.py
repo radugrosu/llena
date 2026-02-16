@@ -9,6 +9,28 @@ from mm.collator import LlenaCollator
 from mm.model import LlenaModel, LlenaModelConfig
 
 
+def _is_unsupported_cuda_arch_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    markers = (
+        "no kernel image is available",
+        "not compatible with your gpu",
+        "not supported on this architecture",
+        "cuda error: invalid device function",
+        "compute capability",
+    )
+    return any(m in msg for m in markers)
+
+
+def _cuda_sm_major() -> int | None:
+    if not torch.cuda.is_available():
+        return None
+    try:
+        major, _minor = torch.cuda.get_device_capability()
+        return major
+    except RuntimeError:
+        return None
+
+
 def _make_batch(model: LlenaModel, device: torch.device) -> dict[str, torch.Tensor]:
     proc = SiglipImageProcessor.from_pretrained(model.cfg.vision_name)
     ds = SyntheticVQADataset(num_samples=2, image_size=224, seed=7)
@@ -60,8 +82,11 @@ def test_peft_lora_forward_cpu() -> None:
 
 @torch.no_grad()
 def test_peft_qlora_forward_cuda() -> None:
-    if not torch.cuda.is_available():
+    sm_major = _cuda_sm_major()
+    if sm_major is None:
         pytest.skip("CUDA is required for QLoRA test.")
+    if sm_major < 7:
+        pytest.skip("QLoRA test requires a newer CUDA architecture (SM70+).")
     try:
         import bitsandbytes  # noqa: F401
     except ImportError:
@@ -82,14 +107,19 @@ def test_peft_qlora_forward_cuda() -> None:
         peft_dropout=0.0,
         qlora_enable=True,
     )
-    model = LlenaModel(cfg)
-    model.eval()
+    try:
+        model = LlenaModel(cfg)
+        model.eval()
 
-    batch = _make_batch(model, torch.device("cuda"))
-    out = model(
-        pixel_values=batch["pixel_values"],
-        input_ids=batch["input_ids"],
-        mm_attention_mask=batch["mm_attention_mask"],
-        mm_labels=batch["mm_labels"],
-    )
+        batch = _make_batch(model, torch.device("cuda"))
+        out = model(
+            pixel_values=batch["pixel_values"],
+            input_ids=batch["input_ids"],
+            mm_attention_mask=batch["mm_attention_mask"],
+            mm_labels=batch["mm_labels"],
+        )
+    except RuntimeError as exc:
+        if _is_unsupported_cuda_arch_error(exc):
+            pytest.skip(f"Skipping QLoRA on unsupported CUDA architecture: {exc}")
+        raise
     assert math.isfinite(float(out.loss))

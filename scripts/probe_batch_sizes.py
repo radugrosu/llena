@@ -123,6 +123,7 @@ def _build_train_model(rc: RunConfig, device: torch.device) -> LlenaModel:
         peft_dropout=rc.train.lora_dropout or 0.0,
         peft_target_modules=list(rc.train.lora_targets or ()),
         qlora_enable=qlora_enable,
+        liger_kernel=rc.train.liger_kernel,
         device="cuda" if device.type == "cuda" else "cpu",
     )
 
@@ -151,6 +152,7 @@ def _build_eval_model(rc: RunConfig, device: torch.device) -> LlenaModel:
         peft_dropout=rc.train.lora_dropout or 0.0,
         peft_target_modules=list(rc.train.lora_targets or ()),
         qlora_enable=qlora_enable,
+        liger_kernel=rc.train.liger_kernel,
         device="cuda" if device.type == "cuda" else "cpu",
     )
     return LlenaModel(mcfg)

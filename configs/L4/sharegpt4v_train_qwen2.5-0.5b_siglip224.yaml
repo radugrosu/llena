@@ -16,7 +16,8 @@ train:
   seed: 42
   device: cuda
   precision: bf16
-  gradient_checkpointing: true
+  liger_kernel: true
+  gradient_checkpointing: false
   weight_decay: 0.0
   warmup_ratio: 0.03
   lr_schedule: cosine

@@ -5,11 +5,33 @@ from transformers import SiglipImageProcessor
 from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator
 from mm.model import LlenaModel, LlenaModelConfig
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+
+def _cuda_sm_major() -> int | None:
+    if not torch.cuda.is_available():
+        return None
+    try:
+        major, _minor = torch.cuda.get_device_capability()
+        return major
+    except RuntimeError:
+        return None
 
 
 @torch.no_grad()
 def test_model_forward_shapes_and_loss_finite() -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    sm_major = _cuda_sm_major()
+    device = torch.device("cuda" if sm_major is not None and sm_major >= 7 else "cpu")
+    if device.type == "cpu":
+        precision = "fp32"
+    else:
+        try:
+            precision = "bf16" if torch.cuda.is_bf16_supported() else "fp16"
+        except RuntimeError:
+            precision = "fp16"
     cfg = LlenaModelConfig(
         llm_name="Qwen/Qwen2.5-0.5B-Instruct",
         vision_name="google/siglip-base-patch16-224",
@@ -18,6 +40,7 @@ def test_model_forward_shapes_and_loss_finite() -> None:
         freeze_vision=True,
         freeze_llm=True,
         gradient_checkpointing=False,
+        precision=precision,
         device="cuda" if device.type == "cuda" else "cpu",
     )
     model = LlenaModel(cfg).to(device)

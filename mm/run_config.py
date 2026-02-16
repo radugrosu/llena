@@ -93,6 +93,7 @@ class TrainConfig:
     seed: int
     device: Literal["auto", "cpu", "cuda"]
     precision: Literal["bf16", "fp16", "fp32"]
+    liger_kernel: bool
 
     batch_size: int
     micro_batch_size: int
@@ -303,6 +304,7 @@ class RunConfig:
             seed=int(train_d["seed"]),
             device=device,  # type: ignore[arg-type]
             precision=cast(Literal["bf16", "fp16", "fp32"], precision),
+            liger_kernel=bool(train_d.get("liger_kernel", False)),
             batch_size=batch_size,
             micro_batch_size=micro_batch_size,
             grad_accum_steps=grad_accum_steps,
