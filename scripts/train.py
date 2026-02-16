@@ -138,7 +138,7 @@ def eval_loop(
     amp_dtype: torch.dtype,
 ) -> float:
     model.eval()
-    total_loss = 0.0
+    total_loss = torch.tensor(0.0, device=device)
     count = 0
     with torch.no_grad():
         for batch in dl:
@@ -151,12 +151,12 @@ def eval_loop(
                     mm_labels=batch_t["mm_labels"],
                 )
                 loss = out.loss
-            total_loss += float(loss.item())
+            total_loss += loss
             count += 1
     model.train()
     if count == 0:
         return float("nan")
-    return total_loss / count
+    return total_loss.item() / count
 
 
 def _ckpt_cfg(model: LlenaModel) -> dict[str, object]:
@@ -299,8 +299,7 @@ def checkpoint_run_mode_message(
             f"resume_checkpoint={resume_ckpt_path} reason=stage_transition ckpt_stage={ckpt_stage} start_step=0"
         )
     return (
-        "ckpt: run_mode=resumed "
-        f"resume_checkpoint={resume_ckpt_path} start_step={start_step} ckpt_stage={ckpt_stage}"
+        f"ckpt: run_mode=resumed resume_checkpoint={resume_ckpt_path} start_step={start_step} ckpt_stage={ckpt_stage}"
     )
 
 
@@ -588,7 +587,7 @@ def run_train(
 
             scaler.scale(loss).backward()
 
-            last_log_tokens += int(batch_t["mm_attention_mask"].sum().item())
+            last_log_tokens += batch_t["mm_attention_mask"].sum()
             last_log_samples += batch_t["mm_attention_mask"].size(0)
 
             if step % accum == 0:
@@ -608,7 +607,7 @@ def run_train(
                 if global_step % log_every == 0:
                     now = time.perf_counter()
                     dt = max(now - last_log_time, 1e-8)
-                    tokens_per_s = last_log_tokens / dt
+                    tokens_per_s = int(last_log_tokens) / dt
                     samples_per_s = last_log_samples / dt
 
                     last_loss = float(loss.item() * accum)
