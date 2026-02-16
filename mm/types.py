@@ -1,4 +1,4 @@
-from typing import Protocol, TypedDict, TypeAlias, Literal, NotRequired
+from typing import Any, Protocol, TypeVar, TypedDict, TypeAlias, Literal, NotRequired
 from PIL import Image
 import torch
 
@@ -55,3 +55,12 @@ class ChatTokenizer(Protocol):
     def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> str: ...
 
     def batch_decode(self, token_ids: list[list[int]], *, skip_special_tokens: bool) -> list[str]: ...
+
+
+T_co = TypeVar("T_co", covariant=True)
+
+
+class SizedDataset(Protocol[T_co]):
+    def __getitem__(self, index: int) -> T_co: ...
+
+    def __len__(self) -> int: ...

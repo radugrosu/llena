@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, cast
 
 import torch
 import typer
@@ -18,6 +18,7 @@ from mm.collator import LlenaCollator, LlenaPackedCollator
 from mm.config import load_config
 from mm.model import LlenaModel, LlenaModelConfig
 from mm.run_config import RunConfig
+from mm.types import SizedDataset
 from scripts import eval as eval_script
 from scripts import train as train_script
 
@@ -260,7 +261,9 @@ def run_probe(
         if probe_train or probe_val:
             typer.echo("probe: building training model")
             train_model = _build_train_model(rc, device)
-            collator_cls = LlenaPackedCollator if rc.data.dataset in {"llava_instruct", "llava_textvqa"} else LlenaCollator
+            collator_cls = (
+                LlenaPackedCollator if rc.data.dataset in {"llava_instruct", "llava_textvqa"} else LlenaCollator
+            )
             train_collator = collator_cls(
                 tokenizer=train_model.tokenizer,
                 image_processor=image_proc,
@@ -272,7 +275,7 @@ def run_probe(
         if probe_train and train_model is not None and train_collator is not None:
             typer.echo("probe[train]: preparing dataset")
             ds_train = train_script.build_dataset(rc, max_samples=sample_cap)
-            train_upper = min(max_batch, len(ds_train))
+            train_upper = min(max_batch, len(cast(SizedDataset, ds_train)))
             if train_upper <= 0:
                 raise ValueError("probe[train]: dataset is empty.")
             if start_batch > train_upper:
@@ -325,11 +328,13 @@ def run_probe(
         if probe_val and train_model is not None and train_collator is not None:
             typer.echo("probe[val]: preparing dataset")
             ds_val = train_script.build_dataset(rc, split="validation", max_samples=sample_cap)
-            val_upper = min(max_batch, len(ds_val))
+            val_upper = min(max_batch, len(cast(SizedDataset, ds_val)))
             if val_upper <= 0:
                 raise ValueError("probe[val]: validation dataset is empty.")
             if start_batch > val_upper:
-                typer.echo(f"probe[val]: start_batch={start_batch} > available={val_upper}; clamping to available size.")
+                typer.echo(
+                    f"probe[val]: start_batch={start_batch} > available={val_upper}; clamping to available size."
+                )
 
             def val_trial(batch_size: int) -> None:
                 dl = DataLoader(
@@ -381,14 +386,16 @@ def run_probe(
 
             use_eval_dataset = _eval_dataset_name(rc.data.dataset, eval_dataset)
             if eval_dataset is None and rc.data.dataset in {"llava_instruct", "llava_textvqa"}:
-                typer.echo(f"probe[eval]: dataset {rc.data.dataset} is instruct-style; using dataset={use_eval_dataset}.")
+                typer.echo(
+                    f"probe[eval]: dataset {rc.data.dataset} is instruct-style; using dataset={use_eval_dataset}."
+                )
             ds_eval = _build_eval_dataset(
                 rc=rc,
                 dataset_name=use_eval_dataset,
                 split=eval_split,
                 max_samples=sample_cap,
             )
-            eval_upper = min(max_batch, len(ds_eval))
+            eval_upper = min(max_batch, len(cast(SizedDataset, ds_eval)))
             if eval_upper <= 0:
                 raise ValueError("probe[eval]: eval dataset is empty.")
             if start_batch > eval_upper:
