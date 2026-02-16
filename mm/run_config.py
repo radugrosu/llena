@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import re
 from typing import Literal, cast
 
+from transformers import SiglipVisionConfig
+
 
 Stage = Literal["projector", "lora", "qlora", "full_ft"]
 DatasetName = Literal[
@@ -60,24 +62,36 @@ def _normalize_vision_token(vision_name: str) -> str:
     return token or "vision"
 
 
-def _derive_image_size(vision_name: str) -> int:
-    lower = vision_name.lower()
-    match = re.search(r"(\d{3,4})(?=\D|$)", lower)
-    if match is None:
-        raise ValueError(f"Unsupported vision model (missing image size): {vision_name}")
-    return int(match.group(1))
+def derive_vision_params(vision_name: str) -> tuple[int, int]:
+    """
+    Returns (image_size, num_image_tokens) directly from the model config.
+    """
+    if not vision_name.strip():
+        raise ValueError("model.vision_name must be a non-empty string")
 
+    try:
+        config = SiglipVisionConfig.from_pretrained(vision_name)
+    except Exception as exc:
+        raise ValueError(f"Failed to load SigLIP vision config for '{vision_name}': {exc}") from exc
 
-def _derive_num_image_tokens(vision_name: str, image_size: int) -> int:
-    lower = vision_name.lower()
-    match = re.search(r"patch(\d+)", lower)
-    if match is None:
-        raise ValueError(f"Unsupported vision model (missing patch size): {vision_name}")
-    patch = int(match.group(1))
-    if image_size % patch != 0:
-        raise ValueError(f"image_size must be divisible by patch size ({patch}) for {vision_name}, got {image_size}")
-    tokens = (image_size // patch) ** 2
-    return tokens
+    image_size = getattr(config, "image_size", None)
+    patch_size = getattr(config, "patch_size", None)
+
+    if not isinstance(image_size, int) or image_size <= 0:
+        raise ValueError(f"Invalid image_size in SigLIP vision config for '{vision_name}': {image_size!r}")
+    if not isinstance(patch_size, int) or patch_size <= 0:
+        raise ValueError(f"Invalid patch_size in SigLIP vision config for '{vision_name}': {patch_size!r}")
+    if image_size % patch_size != 0:
+        raise ValueError(
+            f"Invalid SigLIP vision config for '{vision_name}': "
+            f"image_size ({image_size}) must be divisible by patch_size ({patch_size})"
+        )
+
+    num_tokens = (image_size // patch_size) ** 2
+    if num_tokens <= 0:
+        raise ValueError(f"Invalid num_image_tokens derived from '{vision_name}': {num_tokens}")
+
+    return image_size, num_tokens
 
 
 def _compute_run_name(*, data: DataConfig, model: ModelConfig) -> str:
@@ -221,8 +235,7 @@ class RunConfig:
         if projector != "mlp2":
             raise ValueError(f"Only projector=mlp2 is supported, got: {projector}")
 
-        image_size = _derive_image_size(model.vision_name)
-        num_image_tokens = _derive_num_image_tokens(model.vision_name, image_size)
+        _, num_image_tokens = derive_vision_params(model.vision_name)
         mm = MmConfig(
             num_image_tokens=num_image_tokens,
             projector="mlp2",

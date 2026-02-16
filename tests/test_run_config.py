@@ -1,5 +1,17 @@
-from mm.run_config import RunConfig
+from types import SimpleNamespace
+
+import mm.run_config as run_config
+from mm.run_config import RunConfig, derive_vision_params
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _mock_siglip_vision_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        run_config.SiglipVisionConfig,
+        "from_pretrained",
+        classmethod(lambda cls, vision_name: SimpleNamespace(image_size=224, patch_size=16)),
+    )
 
 
 def _base_cfg() -> dict:
@@ -59,6 +71,32 @@ def test_run_name_auto_from_config() -> None:
     cfg["data"]["split"] = "validation"
     rc = RunConfig.from_dict(cfg)
     assert rc.project.run_name == "textvqa_validation_qwen2.5-0.5b_siglip224"
+
+
+def test_mm_num_image_tokens_derived_from_vision_config() -> None:
+    cfg = _base_cfg()
+    cfg["mm"]["num_image_tokens"] = 999
+    rc = RunConfig.from_dict(cfg)
+    assert rc.mm.num_image_tokens == 196
+
+
+def test_derive_vision_params_fail_fast_on_invalid_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        run_config.SiglipVisionConfig,
+        "from_pretrained",
+        classmethod(lambda cls, vision_name: SimpleNamespace(image_size=224, patch_size=0)),
+    )
+    with pytest.raises(ValueError, match="Invalid patch_size"):
+        derive_vision_params("google/siglip-base-patch16-224")
+
+
+def test_run_config_fail_fast_when_vision_config_load_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(cls: type, vision_name: str) -> object:
+        raise OSError("config not found")
+
+    monkeypatch.setattr(run_config.SiglipVisionConfig, "from_pretrained", classmethod(_raise))
+    with pytest.raises(ValueError, match="Failed to load SigLIP vision config"):
+        RunConfig.from_dict(_base_cfg())
 
 
 def test_eval_generate_batch_size_multiplier_defaults_and_validation() -> None:
