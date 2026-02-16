@@ -197,7 +197,7 @@ def _execute_probe_trial(
     try:
         run_trial(batch_size)
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if is_oom_error(exc):
             typer.echo(f"probe[{mode}]: batch_size={batch_size} -> OOM")
             return False
@@ -228,6 +228,7 @@ def run_probe(
     probe_val: bool,
     probe_eval_teacher: bool,
     probe_eval_generate: bool,
+    apply_liger_kernel: bool = False,
     override: list[str] | None = None,
 ) -> list[ProbeResult]:
     if safety_margin <= 0.0 or safety_margin > 1.0:
@@ -235,7 +236,10 @@ def run_probe(
     if probe_samples <= 0:
         raise ValueError(f"probe_samples must be > 0, got: {probe_samples}")
 
-    overrides = override or []
+    overrides = list(override or [])
+    if apply_liger_kernel:
+        overrides.append("train.liger_kernel=true")
+        typer.echo("probe: forcing train.liger_kernel=true")
     load_dotenv()
     raw_cfg = load_config(config, overrides=overrides)
     rc = RunConfig.from_dict(raw_cfg)
@@ -287,6 +291,8 @@ def run_probe(
             train_model.train()
 
             def train_trial(batch_size: int) -> None:
+                train_model.zero_grad(set_to_none=True)
+                optimizer = torch.optim.AdamW([p for p in train_model.parameters() if p.requires_grad], lr=1e-3)
                 dl = DataLoader(
                     ds_train,
                     batch_size=batch_size,
@@ -296,7 +302,6 @@ def run_probe(
                 )
                 batch = next(iter(dl))
                 batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
-                train_model.zero_grad(set_to_none=True)
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                     out = train_model(
                         pixel_values=batch_t["pixel_values"],
@@ -306,7 +311,8 @@ def run_probe(
                     )
                     loss = out.loss
                 loss.backward()
-                train_model.zero_grad(set_to_none=True)
+                optimizer.step()
+                optimizer.zero_grad()
 
             max_ok, tested_up_to = _search_max_batch(
                 try_batch=lambda bs: _execute_probe_trial(
@@ -550,6 +556,7 @@ def main(
     probe_val: bool = opt(True, "Probe validation batch size (teacher-forced forward)."),
     probe_eval_teacher: bool = opt(True, "Probe eval teacher batch size."),
     probe_eval_generate: bool = opt(True, "Probe eval generate batch size."),
+    apply_liger_kernel: bool = opt(False, "Force-enable train.liger_kernel for this probe run."),
     override: list[str] = opt([], "Config override(s): KEY=VALUE (repeatable)."),
 ) -> None:
     run_probe(
@@ -567,6 +574,7 @@ def main(
         probe_val=probe_val,
         probe_eval_teacher=probe_eval_teacher,
         probe_eval_generate=probe_eval_generate,
+        apply_liger_kernel=apply_liger_kernel,
         override=override,
     )
 

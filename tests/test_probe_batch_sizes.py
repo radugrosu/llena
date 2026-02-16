@@ -1,3 +1,5 @@
+import pytest
+
 import scripts.probe_batch_sizes as probe_script
 
 
@@ -47,3 +49,85 @@ def test_recommend_applies_margin_and_floor() -> None:
     assert probe_script._recommend(64, 0.9) == 57
     assert probe_script._recommend(1, 0.9) == 1
     assert probe_script._recommend(0, 0.9) == 0
+
+
+def test_run_probe_apply_liger_kernel_adds_override(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load_dotenv() -> None:
+        return None
+
+    def fake_load_config(config: str, overrides: list[str]) -> dict:
+        captured["config"] = config
+        captured["overrides"] = list(overrides)
+        return {}
+
+    def fake_from_dict(_cfg: dict) -> object:
+        raise RuntimeError("stop after override capture")
+
+    monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(probe_script, "load_config", fake_load_config)
+    monkeypatch.setattr(probe_script.RunConfig, "from_dict", staticmethod(fake_from_dict))
+
+    with pytest.raises(RuntimeError, match="stop after override capture"):
+        probe_script.run_probe(
+            config="dummy.yaml",
+            out_json=None,
+            max_batch=1,
+            start_batch=1,
+            probe_samples=1,
+            safety_margin=1.0,
+            eval_dataset=None,
+            eval_split="validation",
+            eval_max_generated_tokens=None,
+            ckpt=None,
+            probe_train=True,
+            probe_val=False,
+            probe_eval_teacher=False,
+            probe_eval_generate=False,
+            apply_liger_kernel=True,
+            override=["data.split=train"],
+        )
+
+    assert captured["config"] == "dummy.yaml"
+    assert captured["overrides"] == ["data.split=train", "train.liger_kernel=true"]
+
+
+def test_run_probe_without_apply_liger_kernel_keeps_overrides(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load_dotenv() -> None:
+        return None
+
+    def fake_load_config(_config: str, overrides: list[str]) -> dict:
+        captured["overrides"] = list(overrides)
+        return {}
+
+    def fake_from_dict(_cfg: dict) -> object:
+        raise RuntimeError("stop after override capture")
+
+    monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(probe_script, "load_config", fake_load_config)
+    monkeypatch.setattr(probe_script.RunConfig, "from_dict", staticmethod(fake_from_dict))
+
+    with pytest.raises(RuntimeError, match="stop after override capture"):
+        probe_script.run_probe(
+            config="dummy.yaml",
+            out_json=None,
+            max_batch=1,
+            start_batch=1,
+            probe_samples=1,
+            safety_margin=1.0,
+            eval_dataset=None,
+            eval_split="validation",
+            eval_max_generated_tokens=None,
+            ckpt=None,
+            probe_train=True,
+            probe_val=False,
+            probe_eval_teacher=False,
+            probe_eval_generate=False,
+            apply_liger_kernel=False,
+            override=["data.split=train"],
+        )
+
+    assert captured["overrides"] == ["data.split=train"]
