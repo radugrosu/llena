@@ -11,15 +11,10 @@ from transformers import (
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 
 from mm.projectors import build_projector
 from mm.types import ChatTokenizer
-
-
-def _apply_liger_kernel_to_qwen2() -> None:
-    from liger_kernel.transformers import apply_liger_kernel_to_qwen2
-
-    apply_liger_kernel_to_qwen2()
 
 
 def _select_or_pad_tokens(tokens: torch.Tensor, num_tokens: int) -> torch.Tensor:
@@ -98,7 +93,7 @@ class LlenaModel(nn.Module):
             attn_implementation=cfg.attn_implementation,
         )
         if cfg.liger_kernel:
-            _apply_liger_kernel_to_qwen2()
+            apply_liger_kernel_to_qwen2()
 
         if cfg.qlora_enable:
             if cfg.device != "cuda":
