@@ -109,6 +109,13 @@ def test_active_gpu_make_and_size_cpu() -> None:
     assert size_gb is None
 
 
+def test_active_gpu_make_and_size_cuda_without_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(probe_script.torch.cuda, "is_available", lambda: False)
+    make, size_gb = probe_script._active_gpu_make_and_size(probe_script.torch.device("cuda"))
+    assert make == "cpu"
+    assert size_gb is None
+
+
 def test_effective_probe_precision_cpu_forces_fp32() -> None:
     precision = probe_script._effective_probe_precision(
         configured_precision="bf16",
@@ -324,3 +331,41 @@ def test_run_probe_skips_qlora_when_cuda_unavailable(monkeypatch) -> None:
     assert result.tested_up_to is None
     assert result.precision == "fp32"
     assert result.note is not None and "CUDA required but not available" in result.note
+
+
+def test_run_probe_skips_when_device_cuda_but_runtime_unavailable(monkeypatch) -> None:
+    fake_rc = SimpleNamespace(
+        model=SimpleNamespace(vision_name="google/siglip-base-patch16-224"),
+        train=SimpleNamespace(stage_name="projector", device="cuda", precision="bf16"),
+    )
+
+    def fake_load_dotenv() -> None:
+        return None
+
+    def fake_load_config(_config_path: str, overrides: list[str]) -> dict:
+        _ = overrides
+        return {}
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("should not be called for skipped CUDA-unavailable probes")
+
+    monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(probe_script, "load_config", fake_load_config)
+    monkeypatch.setattr(probe_script.RunConfig, "from_dict", staticmethod(lambda _cfg: fake_rc))
+    monkeypatch.setattr(probe_script, "derive_vision_params", lambda _vision_name: (224, 196))
+    monkeypatch.setattr(probe_script.train_script, "get_device", lambda _dev, force_cuda: probe_script.torch.device("cuda"))
+    monkeypatch.setattr(probe_script.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(probe_script.SiglipImageProcessor, "from_pretrained", staticmethod(fail_if_called))
+
+    result = probe_script.run_probe(
+        config_path="dummy.yaml",
+        probe_mode="train",
+        gradient_checkpointing=False,
+        liger_kernel=False,
+        log_wandb=False,
+    )
+
+    assert result.max_ok_batch is None
+    assert result.recommended_batch is None
+    assert result.tested_up_to is None
+    assert result.note is not None and "train.device resolved to cuda but CUDA is unavailable" in result.note

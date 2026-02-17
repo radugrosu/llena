@@ -53,25 +53,31 @@ class ProbeResult:
 
 
 def _active_gpu_make_and_size(device: torch.device) -> tuple[str, float | None]:
-    if device.type != "cuda":
+    if device.type != "cuda" or not torch.cuda.is_available():
         return "cpu", None
 
-    active_index = int(torch.cuda.current_device())
-    props = torch.cuda.get_device_properties(active_index)
-    make = str(props.name)
-    size_gb = round(float(props.total_memory) / (1024**3), 2)
-    return make, size_gb
+    try:
+        active_index = int(torch.cuda.current_device())
+        props = torch.cuda.get_device_properties(active_index)
+        make = str(props.name)
+        size_gb = round(float(props.total_memory) / (1024**3), 2)
+        return make, size_gb
+    except Exception:
+        return "cuda", None
 
 
 def _effective_probe_precision(*, configured_precision: str, device: torch.device) -> str:
-    if device.type != "cuda":
+    if device.type != "cuda" or not torch.cuda.is_available():
         return "fp32"
     return configured_precision
 
 
 def _synchronize_device(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
+    if device.type == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            return
 
 
 def measure_throughput(
@@ -204,9 +210,12 @@ def _log_probe_matrix_to_wandb(*, rc: RunConfig, config_path: str, results: list
 
 
 def _clear_device_cache(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+    if device.type == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        except Exception:
+            return
 
 
 def is_oom_error(exc: BaseException) -> bool:
@@ -978,6 +987,30 @@ def run_probe(
     amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
     gpu_make, gpu_size_gb = _active_gpu_make_and_size(device)
     precision_used = _effective_probe_precision(configured_precision=rc.train.precision, device=device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        result = ProbeResult(
+            mode=probe_mode,
+            max_ok_batch=None,
+            tested_up_to=None,
+            recommended_batch=None,
+            precision=precision_used,
+            gradient_checkpointing=gradient_checkpointing,
+            liger_kernel=liger_kernel,
+            gpu_make=gpu_make,
+            gpu_size_gb=gpu_size_gb,
+            tokens_per_sec=None,
+            note="skipped: train.device resolved to cuda but CUDA is unavailable",
+        )
+        note = f" ({result.note})" if result.note else ""
+        typer.echo(
+            f"probe[{result.mode}]: max_ok=n/a recommended=n/a tested_up_to=n/a "
+            f"precision={result.precision} gradient_checkpointing={result.gradient_checkpointing} "
+            f"liger_kernel={result.liger_kernel} gpu_make={result.gpu_make} "
+            f"gpu_size_gb={result.gpu_size_gb} tokens_per_sec=n/a{note}"
+        )
+        if log_wandb:
+            _log_probe_result_to_wandb(rc=rc, config_path=config_path, result=result)
+        return result
     if liger_kernel and device.type != "cuda":
         result = ProbeResult(
             mode=probe_mode,
