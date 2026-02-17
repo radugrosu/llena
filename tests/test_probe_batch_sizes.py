@@ -333,7 +333,7 @@ def test_run_probe_skips_qlora_when_cuda_unavailable(monkeypatch) -> None:
     assert result.note is not None and "CUDA required but not available" in result.note
 
 
-def test_run_probe_skips_when_device_cuda_but_runtime_unavailable(monkeypatch) -> None:
+def test_run_probe_falls_back_to_cpu_when_cuda_unavailable(monkeypatch) -> None:
     fake_rc = SimpleNamespace(
         model=SimpleNamespace(vision_name="google/siglip-base-patch16-224"),
         train=SimpleNamespace(stage_name="projector", device="cuda", precision="bf16"),
@@ -346,8 +346,8 @@ def test_run_probe_skips_when_device_cuda_but_runtime_unavailable(monkeypatch) -
         _ = overrides
         return {}
 
-    def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("should not be called for skipped CUDA-unavailable probes")
+    def stop_after_fallback(*_args, **_kwargs):
+        raise RuntimeError("reached after cpu fallback")
 
     monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
     monkeypatch.setattr(probe_script, "load_config", fake_load_config)
@@ -355,17 +355,13 @@ def test_run_probe_skips_when_device_cuda_but_runtime_unavailable(monkeypatch) -
     monkeypatch.setattr(probe_script, "derive_vision_params", lambda _vision_name: (224, 196))
     monkeypatch.setattr(probe_script.train_script, "get_device", lambda _dev, force_cuda: probe_script.torch.device("cuda"))
     monkeypatch.setattr(probe_script.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(probe_script.SiglipImageProcessor, "from_pretrained", staticmethod(fail_if_called))
+    monkeypatch.setattr(probe_script.SiglipImageProcessor, "from_pretrained", staticmethod(stop_after_fallback))
 
-    result = probe_script.run_probe(
-        config_path="dummy.yaml",
-        probe_mode="train",
-        gradient_checkpointing=False,
-        liger_kernel=False,
-        log_wandb=False,
-    )
-
-    assert result.max_ok_batch is None
-    assert result.recommended_batch is None
-    assert result.tested_up_to is None
-    assert result.note is not None and "train.device resolved to cuda but CUDA is unavailable" in result.note
+    with pytest.raises(RuntimeError, match="reached after cpu fallback"):
+        probe_script.run_probe(
+            config_path="dummy.yaml",
+            probe_mode="train",
+            gradient_checkpointing=False,
+            liger_kernel=False,
+            log_wandb=False,
+        )

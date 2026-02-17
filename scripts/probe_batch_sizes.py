@@ -983,34 +983,13 @@ def run_probe(
                 _log_probe_result_to_wandb(rc=rc, config_path=config_path, result=result)
             return result
         raise
+    if device.type == "cuda" and not torch.cuda.is_available():
+        typer.echo("probe: train.device resolved to cuda but CUDA is unavailable; falling back to cpu.")
+        device = torch.device("cpu")
     use_amp = device.type == "cuda" and rc.train.precision in {"bf16", "fp16"}
     amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
     gpu_make, gpu_size_gb = _active_gpu_make_and_size(device)
     precision_used = _effective_probe_precision(configured_precision=rc.train.precision, device=device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        result = ProbeResult(
-            mode=probe_mode,
-            max_ok_batch=None,
-            tested_up_to=None,
-            recommended_batch=None,
-            precision=precision_used,
-            gradient_checkpointing=gradient_checkpointing,
-            liger_kernel=liger_kernel,
-            gpu_make=gpu_make,
-            gpu_size_gb=gpu_size_gb,
-            tokens_per_sec=None,
-            note="skipped: train.device resolved to cuda but CUDA is unavailable",
-        )
-        note = f" ({result.note})" if result.note else ""
-        typer.echo(
-            f"probe[{result.mode}]: max_ok=n/a recommended=n/a tested_up_to=n/a "
-            f"precision={result.precision} gradient_checkpointing={result.gradient_checkpointing} "
-            f"liger_kernel={result.liger_kernel} gpu_make={result.gpu_make} "
-            f"gpu_size_gb={result.gpu_size_gb} tokens_per_sec=n/a{note}"
-        )
-        if log_wandb:
-            _log_probe_result_to_wandb(rc=rc, config_path=config_path, result=result)
-        return result
     if liger_kernel and device.type != "cuda":
         result = ProbeResult(
             mode=probe_mode,
