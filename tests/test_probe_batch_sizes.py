@@ -1,5 +1,7 @@
+from typing import cast
 import pytest
 
+from mm.types import ChatTokenizer
 import scripts.probe_batch_sizes as probe_script
 
 
@@ -26,7 +28,7 @@ class _FakeTokenizer:
 
 
 def test_build_full_sequence_question_reaches_target_length() -> None:
-    tokenizer = _FakeTokenizer()
+    tokenizer = cast(ChatTokenizer, _FakeTokenizer())
     q = probe_script._build_full_sequence_question(tokenizer, max_seq_len=64)
     assert probe_script._chat_prompt_len(tokenizer, q) >= 64
 
@@ -77,6 +79,41 @@ def test_recommend_applies_margin_and_floor() -> None:
     assert probe_script._recommend(64, 0.9) == 57
     assert probe_script._recommend(1, 0.9) == 1
     assert probe_script._recommend(0, 0.9) == 0
+
+
+def test_measure_throughput_counts_tokens(monkeypatch) -> None:
+    ticks = iter([10.0, 12.0])
+    monkeypatch.setattr(probe_script.time, "perf_counter", lambda: next(ticks))
+
+    calls = {"count": 0}
+
+    def run_step() -> int:
+        calls["count"] += 1
+        return 128
+
+    tps = probe_script.measure_throughput(
+        run_step=run_step,
+        num_steps=5,
+        warmup_steps=2,
+        device=probe_script.torch.device("cpu"),
+    )
+
+    assert calls["count"] == 7
+    assert tps == pytest.approx((5 * 128) / 2.0)
+
+
+def test_active_gpu_make_and_size_cpu() -> None:
+    make, size_gb = probe_script._active_gpu_make_and_size(probe_script.torch.device("cpu"))
+    assert make == "cpu"
+    assert size_gb is None
+
+
+def test_effective_probe_precision_cpu_forces_fp32() -> None:
+    precision = probe_script._effective_probe_precision(
+        configured_precision="bf16",
+        device=probe_script.torch.device("cpu"),
+    )
+    assert precision == "fp32"
 
 
 def test_run_probe_adds_runtime_overrides_true(monkeypatch) -> None:
@@ -141,3 +178,70 @@ def test_run_probe_adds_runtime_overrides_false(monkeypatch) -> None:
         "train.gradient_checkpointing=false",
         "train.liger_kernel=false",
     ]
+
+
+def test_run_probe_matrix_collects_all_combinations(monkeypatch) -> None:
+    calls: list[tuple[str, bool, bool, bool]] = []
+    logged: dict[str, object] = {}
+
+    def fake_run_probe(
+        *,
+        config_path: str,
+        probe_mode: probe_script.ProbeMode,
+        gradient_checkpointing: bool,
+        liger_kernel: bool,
+        log_wandb: bool,
+    ) -> probe_script.ProbeResult:
+        calls.append((probe_mode, gradient_checkpointing, liger_kernel, log_wandb))
+        return probe_script.ProbeResult(
+            mode=probe_mode,
+            max_ok_batch=8,
+            tested_up_to=16,
+            recommended_batch=7,
+            precision="bf16",
+            gradient_checkpointing=gradient_checkpointing,
+            liger_kernel=liger_kernel,
+            gpu_make="A100",
+            gpu_size_gb=80.0,
+        )
+
+    def fake_load_dotenv() -> None:
+        return None
+
+    def fake_load_config(config_path: str, overrides: list[str]) -> dict:
+        logged["config_path"] = config_path
+        logged["overrides"] = list(overrides)
+        return {"ok": True}
+
+    class _FakeRunConfig:
+        @staticmethod
+        def from_dict(_cfg: dict) -> object:
+            return "run-config"
+
+    def fake_log_probe_matrix_to_wandb(
+        *, rc: object, config_path: str, results: list[probe_script.ProbeResult]
+    ) -> None:
+        logged["rc"] = rc
+        logged["matrix_config_path"] = config_path
+        logged["results"] = results
+
+    monkeypatch.setattr(probe_script, "run_probe", fake_run_probe)
+    monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(probe_script, "load_config", fake_load_config)
+    monkeypatch.setattr(probe_script, "RunConfig", _FakeRunConfig)
+    monkeypatch.setattr(probe_script, "_log_probe_matrix_to_wandb", fake_log_probe_matrix_to_wandb)
+
+    results = probe_script.run_probe_matrix(config_path="cfg.yaml")
+
+    expected_count = len(probe_script.MATRIX_PROBE_MODES) * 2 * 2
+    assert len(results) == expected_count
+    assert len(calls) == expected_count
+    assert all(log_wandb is False for _, _, _, log_wandb in calls)
+    assert logged["config_path"] == "cfg.yaml"
+    assert logged["overrides"] == [
+        "train.gradient_checkpointing=false",
+        "train.liger_kernel=false",
+    ]
+    assert logged["matrix_config_path"] == "cfg.yaml"
+    assert logged["rc"] == "run-config"
+    assert len(logged["results"]) == expected_count  # pyright: ignore[reportArgumentType]

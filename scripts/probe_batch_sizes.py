@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Callable, Literal, Sized, cast
 
 import torch
 import typer
+import wandb
 from dotenv import load_dotenv
 from torch.utils.data import DataLoader, Dataset
 from transformers import SiglipImageProcessor
@@ -26,6 +28,9 @@ DEFAULT_MAX_BATCH = 256
 DEFAULT_START_BATCH = 1
 DEFAULT_PROBE_SAMPLES = 256
 DEFAULT_SAFETY_MARGIN = 0.9
+DEFAULT_THROUGHPUT_STEPS = 10
+DEFAULT_THROUGHPUT_WARMUP_STEPS = 3
+MATRIX_PROBE_MODES: tuple[ProbeMode, ...] = ("train", "validation", "eval_teacher", "eval_generate")
 
 
 def opt(default: object, help: str):
@@ -38,9 +43,164 @@ class ProbeResult:
     max_ok_batch: int
     tested_up_to: int
     recommended_batch: int
+    precision: str
     gradient_checkpointing: bool
     liger_kernel: bool
+    gpu_make: str
+    gpu_size_gb: float | None
+    tokens_per_sec: float | None = None
     note: str | None = None
+
+
+def _active_gpu_make_and_size(device: torch.device) -> tuple[str, float | None]:
+    if device.type != "cuda":
+        return "cpu", None
+
+    active_index = int(torch.cuda.current_device())
+    props = torch.cuda.get_device_properties(active_index)
+    make = str(props.name)
+    size_gb = round(float(props.total_memory) / (1024**3), 2)
+    return make, size_gb
+
+
+def _effective_probe_precision(*, configured_precision: str, device: torch.device) -> str:
+    if device.type != "cuda":
+        return "fp32"
+    return configured_precision
+
+
+def _synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def measure_throughput(
+    *,
+    run_step: Callable[[], int],
+    num_steps: int = DEFAULT_THROUGHPUT_STEPS,
+    warmup_steps: int = DEFAULT_THROUGHPUT_WARMUP_STEPS,
+    device: torch.device,
+) -> float:
+    for _ in range(warmup_steps):
+        _ = run_step()
+
+    _synchronize_device(device)
+    start_time = time.perf_counter()
+    total_tokens = 0
+    for _ in range(num_steps):
+        total_tokens += run_step()
+    _synchronize_device(device)
+    end_time = time.perf_counter()
+
+    duration = end_time - start_time
+    if duration <= 0:
+        raise RuntimeError(f"Invalid throughput duration: {duration}")
+    return float(total_tokens) / duration
+
+
+def _log_probe_result_to_wandb(*, rc: RunConfig, config_path: str, result: ProbeResult) -> None:
+    if rc.logging.backend != "wandb":
+        typer.echo("probe: logging.backend is not 'wandb'; skipping W&B logging.")
+        return
+
+    project = rc.logging.wandb_project or rc.project.name
+    run_name = (
+        f"probe_{rc.project.run_name}_{result.mode}_"
+        f"{result.precision}_gc{int(result.gradient_checkpointing)}_lk{int(result.liger_kernel)}"
+    )
+    run = wandb.init(
+        project=project,
+        name=run_name,
+        job_type="batch_size_probe",
+    )
+    try:
+        table = wandb.Table(
+            columns=[
+                "config_path",
+                "probe_mode",
+                "max_ok_batch",
+                "recommended_batch",
+                "tested_up_to",
+                "precision",
+                "gradient_checkpointing",
+                "liger_kernel",
+                "gpu_make",
+                "gpu_size_gb",
+                "tokens_per_sec",
+                "note",
+            ]
+        )
+        table.add_data(
+            config_path,
+            result.mode,
+            result.max_ok_batch,
+            result.recommended_batch,
+            result.tested_up_to,
+            result.precision,
+            int(result.gradient_checkpointing),
+            int(result.liger_kernel),
+            result.gpu_make,
+            result.gpu_size_gb,
+            result.tokens_per_sec,
+            result.note or "",
+        )
+
+        wandb.log({"probe/results_table": table})
+    finally:
+        if run is not None:
+            wandb.finish()
+
+
+def _log_probe_matrix_to_wandb(*, rc: RunConfig, config_path: str, results: list[ProbeResult]) -> None:
+    if rc.logging.backend != "wandb":
+        typer.echo("probe: logging.backend is not 'wandb'; skipping W&B logging.")
+        return
+    if not results:
+        return
+
+    project = rc.logging.wandb_project or rc.project.name
+    run_name = f"probe_matrix_{rc.project.run_name}"
+    run = wandb.init(
+        project=project,
+        name=run_name,
+        job_type="batch_size_probe_matrix",
+    )
+    try:
+        table = wandb.Table(
+            columns=[
+                "config_path",
+                "probe_mode",
+                "max_ok_batch",
+                "recommended_batch",
+                "tested_up_to",
+                "precision",
+                "gradient_checkpointing",
+                "liger_kernel",
+                "gpu_make",
+                "gpu_size_gb",
+                "tokens_per_sec",
+                "note",
+            ]
+        )
+        for result in results:
+            table.add_data(
+                config_path,
+                result.mode,
+                result.max_ok_batch,
+                result.recommended_batch,
+                result.tested_up_to,
+                result.precision,
+                int(result.gradient_checkpointing),
+                int(result.liger_kernel),
+                result.gpu_make,
+                result.gpu_size_gb,
+                result.tokens_per_sec,
+                result.note or "",
+            )
+        wandb.log({"probe/results_table": table})
+    finally:
+        if run is not None:
+            wandb.finish()
 
 
 def _clear_device_cache(device: torch.device) -> None:
@@ -209,9 +369,6 @@ def _chat_prompt_len(tokenizer: ChatTokenizer, question: str) -> int:
 
 
 def _build_full_sequence_question(tokenizer: ChatTokenizer, max_seq_len: int) -> str:
-    if max_seq_len <= 0:
-        raise ValueError(f"max_seq_len must be > 0, got: {max_seq_len}")
-
     base = "Describe the visual scene precisely and explain the rectangle color."
     filler = " detail"
     if _chat_prompt_len(tokenizer, base) >= max_seq_len:
@@ -222,7 +379,7 @@ def _build_full_sequence_question(tokenizer: ChatTokenizer, max_seq_len: int) ->
     while _chat_prompt_len(tokenizer, f"{base}{filler * high}") < max_seq_len:
         low = high
         high *= 2
-        if high > 2**20:
+        if high > 2**12:
             raise RuntimeError(f"Unable to build a full-sequence probe prompt for max_seq_len={max_seq_len}")
 
     while low + 1 < high:
@@ -252,6 +409,208 @@ def _build_probe_dataset(
     )
 
 
+def _measure_training_tokens_per_second(
+    *,
+    model: LlenaModel,
+    collator: LlenaCollator,
+    dataset: Dataset,
+    batch_size: int,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> float:
+    dl = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator, num_workers=0)
+    iterator = iter(dl)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=1e-3)
+
+    def next_batch():
+        nonlocal iterator
+        try:
+            return next(iterator)
+        except StopIteration:
+            iterator = iter(dl)
+            return next(iterator)
+
+    def run_step() -> int:
+        optimizer.zero_grad(set_to_none=True)
+        batch = next_batch()
+        batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
+        tokens = int(batch_t["input_ids"].numel())
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            out = model(
+                pixel_values=batch_t["pixel_values"],
+                input_ids=batch_t["input_ids"],
+                mm_attention_mask=batch_t["mm_attention_mask"],
+                mm_labels=batch_t["mm_labels"],
+            )
+            loss = out.loss
+        loss.backward()
+        optimizer.step()
+        return tokens
+
+    return measure_throughput(run_step=run_step, device=device)
+
+
+def _measure_validation_tokens_per_second(
+    *,
+    model: LlenaModel,
+    collator: LlenaCollator,
+    dataset: Dataset,
+    batch_size: int,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> float:
+    dl = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator, num_workers=0)
+    iterator = iter(dl)
+    was_training = model.training
+    model.eval()
+
+    def next_batch():
+        nonlocal iterator
+        try:
+            return next(iterator)
+        except StopIteration:
+            iterator = iter(dl)
+            return next(iterator)
+
+    def run_step() -> int:
+        batch = next_batch()
+        batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
+        tokens = int(batch_t["input_ids"].numel())
+        total_loss = 0.0
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                out = model(
+                    pixel_values=batch_t["pixel_values"],
+                    input_ids=batch_t["input_ids"],
+                    mm_attention_mask=batch_t["mm_attention_mask"],
+                    mm_labels=batch_t["mm_labels"],
+                )
+                total_loss += out.loss
+        total_loss.item()
+        return tokens
+
+    try:
+        return measure_throughput(run_step=run_step, device=device)
+    finally:
+        model.train(was_training)
+
+
+def _measure_eval_teacher_tokens_per_second(
+    *,
+    rc: RunConfig,
+    model: LlenaModel,
+    image_proc: SiglipImageProcessor,
+    dataset: Dataset,
+    batch_size: int,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> float:
+    collator = LlenaCollator(
+        tokenizer=model.tokenizer,
+        image_processor=image_proc,
+        max_seq_len=rc.train.max_seq_len,
+        num_image_tokens=rc.mm.num_image_tokens,
+        pad_to_multiple_of=8,
+    )
+    dl = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda b: eval_script._collate_eval_teacher(collator, b),
+        num_workers=0,
+    )
+    iterator = iter(dl)
+    model.eval()
+
+    def next_batch():
+        nonlocal iterator
+        try:
+            return next(iterator)
+        except StopIteration:
+            iterator = iter(dl)
+            return next(iterator)
+
+    def run_step() -> int:
+        batch, _answers = next_batch()
+        batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
+        tokens = int(batch_t["input_ids"].numel())
+        total_loss = 0.0
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                out = model(
+                    pixel_values=batch_t["pixel_values"],
+                    input_ids=batch_t["input_ids"],
+                    mm_attention_mask=batch_t["mm_attention_mask"],
+                    mm_labels=batch_t["mm_labels"],
+                )
+                total_loss += out.loss
+        total_loss.item()
+        return tokens
+
+    return measure_throughput(run_step=run_step, device=device)
+
+
+def _measure_eval_generate_tokens_per_second(
+    *,
+    rc: RunConfig,
+    model: LlenaModel,
+    image_proc: SiglipImageProcessor,
+    dataset: Dataset,
+    batch_size: int,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> float:
+    max_gen_tokens = rc.eval.max_generated_tokens
+    tokenizer = model.tokenizer
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    if pad_id is None:
+        raise ValueError("Tokenizer has no pad_token_id or eos_token_id.")
+
+    dl = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda b: eval_script._collate_eval_generate(image_proc, b),
+        num_workers=0,
+    )
+    iterator = iter(dl)
+    model.eval()
+
+    def next_batch():
+        nonlocal iterator
+        try:
+            return next(iterator)
+        except StopIteration:
+            iterator = iter(dl)
+            return next(iterator)
+
+    def run_step() -> int:
+        images, questions, _answers = next_batch()
+        with torch.no_grad():
+            _ = eval_script._generate_batch(
+                model,
+                images,
+                questions,
+                device=device,
+                tokenizer=tokenizer,
+                pad_id=int(pad_id),
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                max_generated_tokens=max_gen_tokens,
+                repetition_penalty=1.0,
+            )
+        prompt_tokens = sum(_chat_prompt_len(tokenizer, q) for q in questions)
+        generated_tokens = len(questions) * max_gen_tokens
+        return int(prompt_tokens + generated_tokens)
+
+    return measure_throughput(run_step=run_step, device=device)
+
+
 def decide_best_training_batch_size(
     *,
     rc: RunConfig,
@@ -264,8 +623,11 @@ def decide_best_training_batch_size(
     max_batch: int,
     start_batch: int,
     safety_margin: float,
+    precision: str,
     gradient_checkpointing: bool,
     liger_kernel: bool,
+    gpu_make: str,
+    gpu_size_gb: float | None,
 ) -> ProbeResult:
     start, upper = _prepare_bounds(mode="train", dataset=dataset, start_batch=start_batch, max_batch=max_batch)
     model.train()
@@ -302,13 +664,29 @@ def decide_best_training_batch_size(
         start_batch=start,
         max_batch=upper,
     )
+    recommended_batch = _recommend(max_ok, safety_margin)
+    tokens_per_sec = None
+    if recommended_batch > 0:
+        tokens_per_sec = _measure_training_tokens_per_second(
+            model=model,
+            collator=collator,
+            dataset=dataset,
+            batch_size=recommended_batch,
+            device=device,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+        )
     return ProbeResult(
         mode="train",
         max_ok_batch=max_ok,
         tested_up_to=tested_up_to,
-        recommended_batch=_recommend(max_ok, safety_margin),
+        recommended_batch=recommended_batch,
+        precision=precision,
         gradient_checkpointing=gradient_checkpointing,
         liger_kernel=liger_kernel,
+        gpu_make=gpu_make,
+        gpu_size_gb=gpu_size_gb,
+        tokens_per_sec=tokens_per_sec,
         note=f"stage={rc.train.stage_name}",
     )
 
@@ -324,8 +702,11 @@ def decide_best_validation_batch_size(
     max_batch: int,
     start_batch: int,
     safety_margin: float,
+    precision: str,
     gradient_checkpointing: bool,
     liger_kernel: bool,
+    gpu_make: str,
+    gpu_size_gb: float | None,
 ) -> ProbeResult:
     start, upper = _prepare_bounds(mode="validation", dataset=dataset, start_batch=start_batch, max_batch=max_batch)
 
@@ -335,6 +716,7 @@ def decide_best_validation_batch_size(
         batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
         was_training = model.training
         model.eval()
+        total_loss = 0.0
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 out = model(
@@ -343,7 +725,8 @@ def decide_best_validation_batch_size(
                     mm_attention_mask=batch_t["mm_attention_mask"],
                     mm_labels=batch_t["mm_labels"],
                 )
-                _ = float(out.loss.item())
+                total_loss += out.loss
+        total_loss.item()
         model.train(was_training)
 
     max_ok, tested_up_to = _search_max_batch(
@@ -356,13 +739,29 @@ def decide_best_validation_batch_size(
         start_batch=start,
         max_batch=upper,
     )
+    recommended_batch = _recommend(max_ok, safety_margin)
+    tokens_per_sec = None
+    if recommended_batch > 0:
+        tokens_per_sec = _measure_validation_tokens_per_second(
+            model=model,
+            collator=collator,
+            dataset=dataset,
+            batch_size=recommended_batch,
+            device=device,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+        )
     return ProbeResult(
         mode="validation",
         max_ok_batch=max_ok,
         tested_up_to=tested_up_to,
-        recommended_batch=_recommend(max_ok, safety_margin),
+        recommended_batch=recommended_batch,
+        precision=precision,
         gradient_checkpointing=gradient_checkpointing,
         liger_kernel=liger_kernel,
+        gpu_make=gpu_make,
+        gpu_size_gb=gpu_size_gb,
+        tokens_per_sec=tokens_per_sec,
     )
 
 
@@ -379,8 +778,11 @@ def decide_best_evaluation_batch_size(
     max_batch: int,
     start_batch: int,
     safety_margin: float,
+    precision: str,
     gradient_checkpointing: bool,
     liger_kernel: bool,
+    gpu_make: str,
+    gpu_size_gb: float | None,
 ) -> ProbeResult:
     if mode == "teacher":
         probe_mode: ProbeMode = "eval_teacher"
@@ -409,6 +811,7 @@ def decide_best_evaluation_batch_size(
             batch, _answers = next(iter(dl))
             batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
             model.eval()
+            total_loss = 0.0
             with torch.no_grad():
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                     out = model(
@@ -417,7 +820,8 @@ def decide_best_evaluation_batch_size(
                         mm_attention_mask=batch_t["mm_attention_mask"],
                         mm_labels=batch_t["mm_labels"],
                     )
-                    _ = float(out.loss.item())
+                    total_loss += out.loss
+            total_loss.item()
 
         max_ok, tested_up_to = _search_max_batch(
             try_batch=lambda bs: _execute_probe_trial(
@@ -429,13 +833,30 @@ def decide_best_evaluation_batch_size(
             start_batch=start,
             max_batch=upper,
         )
+        recommended_batch = _recommend(max_ok, safety_margin)
+        tokens_per_sec = None
+        if recommended_batch > 0:
+            tokens_per_sec = _measure_eval_teacher_tokens_per_second(
+                rc=rc,
+                model=model,
+                image_proc=image_proc,
+                dataset=dataset,
+                batch_size=recommended_batch,
+                device=device,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+            )
         return ProbeResult(
             mode="eval_teacher",
             max_ok_batch=max_ok,
             tested_up_to=tested_up_to,
-            recommended_batch=_recommend(max_ok, safety_margin),
+            recommended_batch=recommended_batch,
+            precision=precision,
             gradient_checkpointing=gradient_checkpointing,
             liger_kernel=liger_kernel,
+            gpu_make=gpu_make,
+            gpu_size_gb=gpu_size_gb,
+            tokens_per_sec=tokens_per_sec,
         )
 
     max_gen_tokens = rc.eval.max_generated_tokens
@@ -478,13 +899,30 @@ def decide_best_evaluation_batch_size(
         start_batch=start,
         max_batch=upper,
     )
+    recommended_batch = _recommend(max_ok, safety_margin)
+    tokens_per_sec = None
+    if recommended_batch > 0:
+        tokens_per_sec = _measure_eval_generate_tokens_per_second(
+            rc=rc,
+            model=model,
+            image_proc=image_proc,
+            dataset=dataset,
+            batch_size=recommended_batch,
+            device=device,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+        )
     return ProbeResult(
         mode="eval_generate",
         max_ok_batch=max_ok,
         tested_up_to=tested_up_to,
-        recommended_batch=_recommend(max_ok, safety_margin),
+        recommended_batch=recommended_batch,
+        precision=precision,
         gradient_checkpointing=gradient_checkpointing,
         liger_kernel=liger_kernel,
+        gpu_make=gpu_make,
+        gpu_size_gb=gpu_size_gb,
+        tokens_per_sec=tokens_per_sec,
         note=f"max_generated_tokens={max_gen_tokens}",
     )
 
@@ -495,6 +933,7 @@ def run_probe(
     probe_mode: ProbeMode,
     gradient_checkpointing: bool,
     liger_kernel: bool,
+    log_wandb: bool = True,
 ) -> ProbeResult:
     overrides = [
         f"train.gradient_checkpointing={'true' if gradient_checkpointing else 'false'}",
@@ -510,6 +949,8 @@ def run_probe(
     device = train_script.get_device(rc.train.device, force_cuda=qlora_enable)
     use_amp = device.type == "cuda" and rc.train.precision in {"bf16", "fp16"}
     amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
+    gpu_make, gpu_size_gb = _active_gpu_make_and_size(device)
+    precision_used = _effective_probe_precision(configured_precision=rc.train.precision, device=device)
 
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
 
@@ -546,8 +987,11 @@ def run_probe(
                     max_batch=DEFAULT_MAX_BATCH,
                     start_batch=DEFAULT_START_BATCH,
                     safety_margin=DEFAULT_SAFETY_MARGIN,
+                    precision=precision_used,
                     gradient_checkpointing=gradient_checkpointing,
                     liger_kernel=liger_kernel,
+                    gpu_make=gpu_make,
+                    gpu_size_gb=gpu_size_gb,
                 )
             else:
                 result = decide_best_validation_batch_size(
@@ -560,8 +1004,11 @@ def run_probe(
                     max_batch=DEFAULT_MAX_BATCH,
                     start_batch=DEFAULT_START_BATCH,
                     safety_margin=DEFAULT_SAFETY_MARGIN,
+                    precision=precision_used,
                     gradient_checkpointing=gradient_checkpointing,
                     liger_kernel=liger_kernel,
+                    gpu_make=gpu_make,
+                    gpu_size_gb=gpu_size_gb,
                 )
 
         else:
@@ -588,8 +1035,11 @@ def run_probe(
                 max_batch=DEFAULT_MAX_BATCH,
                 start_batch=DEFAULT_START_BATCH,
                 safety_margin=DEFAULT_SAFETY_MARGIN,
+                precision=precision_used,
                 gradient_checkpointing=gradient_checkpointing,
                 liger_kernel=liger_kernel,
+                gpu_make=gpu_make,
+                gpu_size_gb=gpu_size_gb,
             )
     finally:
         del train_model
@@ -597,12 +1047,48 @@ def run_probe(
         _clear_device_cache(device)
 
     note = f" ({result.note})" if result.note else ""
+    throughput_text = f"{result.tokens_per_sec:.2f}" if result.tokens_per_sec is not None else "n/a"
     typer.echo(
         f"probe[{result.mode}]: max_ok={result.max_ok_batch} recommended={result.recommended_batch} "
-        f"tested_up_to={result.tested_up_to} gradient_checkpointing={result.gradient_checkpointing} "
-        f"liger_kernel={result.liger_kernel}{note}"
+        f"tested_up_to={result.tested_up_to} precision={result.precision} "
+        f"gradient_checkpointing={result.gradient_checkpointing} "
+        f"liger_kernel={result.liger_kernel} gpu_make={result.gpu_make} "
+        f"gpu_size_gb={result.gpu_size_gb} tokens_per_sec={throughput_text}{note}"
     )
+    if log_wandb:
+        _log_probe_result_to_wandb(rc=rc, config_path=config_path, result=result)
     return result
+
+
+def run_probe_matrix(*, config_path: str) -> list[ProbeResult]:
+    results: list[ProbeResult] = []
+    for probe_mode in MATRIX_PROBE_MODES:
+        for gradient_checkpointing in (False, True):
+            for liger_kernel in (False, True):
+                typer.echo(
+                    f"probe[matrix]: mode={probe_mode} "
+                    f"gradient_checkpointing={gradient_checkpointing} liger_kernel={liger_kernel}"
+                )
+                result = run_probe(
+                    config_path=config_path,
+                    probe_mode=probe_mode,
+                    gradient_checkpointing=gradient_checkpointing,
+                    liger_kernel=liger_kernel,
+                    log_wandb=False,
+                )
+                results.append(result)
+
+    load_dotenv()
+    raw_cfg = load_config(
+        config_path,
+        overrides=[
+            "train.gradient_checkpointing=false",
+            "train.liger_kernel=false",
+        ],
+    )
+    rc = RunConfig.from_dict(raw_cfg)
+    _log_probe_matrix_to_wandb(rc=rc, config_path=config_path, results=results)
+    return results
 
 
 def main(
@@ -610,13 +1096,17 @@ def main(
     probe_mode: ProbeMode = opt("train", "Probe mode: train|validation|eval_teacher|eval_generate."),
     gradient_checkpointing: bool = opt(False, "Override train.gradient_checkpointing for this probe run."),
     liger_kernel: bool = opt(False, "Override train.liger_kernel for this probe run."),
+    matrix: bool = opt(False, "Run full matrix across modes x gradient_checkpointing x liger_kernel in one W&B table."),
 ) -> None:
-    run_probe(
-        config_path=config_path,
-        probe_mode=probe_mode,
-        gradient_checkpointing=gradient_checkpointing,
-        liger_kernel=liger_kernel,
-    )
+    if matrix:
+        run_probe_matrix(config_path=config_path)
+    else:
+        run_probe(
+            config_path=config_path,
+            probe_mode=probe_mode,
+            gradient_checkpointing=gradient_checkpointing,
+            liger_kernel=liger_kernel,
+        )
 
 
 if __name__ == "__main__":
