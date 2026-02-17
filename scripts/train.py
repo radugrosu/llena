@@ -20,7 +20,7 @@ from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator, LlenaPackedCollator
 from mm.config import load_config, save_resolved_config
 from mm.model import LlenaModel, LlenaModelConfig
-from mm.run_config import RunConfig, Stage
+from mm.run_config import RunConfig, Stage, derive_vision_params
 from scripts.utils import get_git_commit
 
 WandbResumePolicy = Literal["auto", "always", "never"]
@@ -63,9 +63,10 @@ def build_dataset(
     if rc.data.dataset == "synthetic":
         if cap is None:
             raise ValueError("data.num_samples must be set for synthetic dataset.")
+        image_size, _ = derive_vision_params(rc.model.vision_name)
         return SyntheticVQADataset(
             num_samples=int(cap),
-            image_size=224,
+            image_size=image_size,
             seed=rc.train.seed,
         )
     if rc.data.dataset == "llava_instruct":

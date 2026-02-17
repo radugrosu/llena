@@ -1,4 +1,4 @@
-from typing import Any, Protocol, TypeVar, TypedDict, TypeAlias, Literal, NotRequired
+from typing import Protocol, TypeVar, TypedDict, TypeAlias, Literal, NotRequired
 from PIL import Image
 import torch
 

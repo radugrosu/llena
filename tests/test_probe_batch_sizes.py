@@ -3,6 +3,34 @@ import pytest
 import scripts.probe_batch_sizes as probe_script
 
 
+class _FakeTokenizer:
+    pad_token_id = 0
+    eos_token_id = 1
+    pad_token = "<pad>"
+    eos_token = "<eos>"
+
+    def apply_chat_template(
+        self,
+        conversation,
+        *,
+        add_generation_prompt: bool,
+        tokenize: bool,
+        return_dict: bool = False,
+        return_tensors: None = None,
+    ):
+        _ = add_generation_prompt, tokenize, return_dict, return_tensors
+        text = " ".join(msg["content"] for msg in conversation)
+        # include small fixed overhead to emulate chat special tokens
+        n = len(text.split()) + 4
+        return list(range(n))
+
+
+def test_build_full_sequence_question_reaches_target_length() -> None:
+    tokenizer = _FakeTokenizer()
+    q = probe_script._build_full_sequence_question(tokenizer, max_seq_len=64)
+    assert probe_script._chat_prompt_len(tokenizer, q) >= 64
+
+
 def test_search_max_batch_finds_threshold() -> None:
     threshold = 37
 
@@ -51,14 +79,14 @@ def test_recommend_applies_margin_and_floor() -> None:
     assert probe_script._recommend(0, 0.9) == 0
 
 
-def test_run_probe_apply_liger_kernel_adds_override(monkeypatch) -> None:
+def test_run_probe_adds_runtime_overrides_true(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_load_dotenv() -> None:
         return None
 
-    def fake_load_config(config: str, overrides: list[str]) -> dict:
-        captured["config"] = config
+    def fake_load_config(config_path: str, overrides: list[str]) -> dict:
+        captured["config_path"] = config_path
         captured["overrides"] = list(overrides)
         return {}
 
@@ -71,35 +99,26 @@ def test_run_probe_apply_liger_kernel_adds_override(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="stop after override capture"):
         probe_script.run_probe(
-            config="dummy.yaml",
-            out_json=None,
-            max_batch=1,
-            start_batch=1,
-            probe_samples=1,
-            safety_margin=1.0,
-            eval_dataset=None,
-            eval_split="validation",
-            eval_max_generated_tokens=None,
-            ckpt=None,
-            probe_train=True,
-            probe_val=False,
-            probe_eval_teacher=False,
-            probe_eval_generate=False,
-            apply_liger_kernel=True,
-            override=["data.split=train"],
+            config_path="dummy.yaml",
+            probe_mode="train",
+            gradient_checkpointing=True,
+            liger_kernel=True,
         )
 
-    assert captured["config"] == "dummy.yaml"
-    assert captured["overrides"] == ["data.split=train", "train.liger_kernel=true"]
+    assert captured["config_path"] == "dummy.yaml"
+    assert captured["overrides"] == [
+        "train.gradient_checkpointing=true",
+        "train.liger_kernel=true",
+    ]
 
 
-def test_run_probe_without_apply_liger_kernel_keeps_overrides(monkeypatch) -> None:
+def test_run_probe_adds_runtime_overrides_false(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_load_dotenv() -> None:
         return None
 
-    def fake_load_config(_config: str, overrides: list[str]) -> dict:
+    def fake_load_config(_config_path: str, overrides: list[str]) -> dict:
         captured["overrides"] = list(overrides)
         return {}
 
@@ -112,22 +131,13 @@ def test_run_probe_without_apply_liger_kernel_keeps_overrides(monkeypatch) -> No
 
     with pytest.raises(RuntimeError, match="stop after override capture"):
         probe_script.run_probe(
-            config="dummy.yaml",
-            out_json=None,
-            max_batch=1,
-            start_batch=1,
-            probe_samples=1,
-            safety_margin=1.0,
-            eval_dataset=None,
-            eval_split="validation",
-            eval_max_generated_tokens=None,
-            ckpt=None,
-            probe_train=True,
-            probe_val=False,
-            probe_eval_teacher=False,
-            probe_eval_generate=False,
-            apply_liger_kernel=False,
-            override=["data.split=train"],
+            config_path="dummy.yaml",
+            probe_mode="train",
+            gradient_checkpointing=False,
+            liger_kernel=False,
         )
 
-    assert captured["overrides"] == ["data.split=train"]
+    assert captured["overrides"] == [
+        "train.gradient_checkpointing=false",
+        "train.liger_kernel=false",
+    ]

@@ -19,7 +19,7 @@ from data.format import JsonlVQADataset, load_vqa_jsonl_dataset
 from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator
 from mm.model import LlenaModel, LlenaModelConfig, _select_or_pad_tokens
-from mm.run_config import RunConfig
+from mm.run_config import RunConfig, derive_vision_params
 from mm.types import CollatorBatch, VQASample
 from PIL import Image
 
@@ -81,9 +81,10 @@ def build_dataset(rc: RunConfig, *, max_samples: int | None) -> Dataset:
             raise ValueError("data.num_samples must be set for synthetic dataset.")
         num_samples = max_samples if max_samples is not None else rc.data.num_samples
         assert num_samples is not None
+        image_size, _ = derive_vision_params(rc.model.vision_name)
         return SyntheticVQADataset(
             num_samples=int(num_samples),
-            image_size=224,
+            image_size=image_size,
             seed=rc.train.seed,
         )
     if rc.data.dataset in {"llava_instruct", "llava_textvqa"}:

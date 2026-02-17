@@ -30,6 +30,19 @@ def _rc_for_llava_textvqa() -> object:
     )
 
 
+def _rc_for_synthetic() -> object:
+    return SimpleNamespace(
+        data=SimpleNamespace(
+            dataset="synthetic",
+            data_dir="unused",
+            split="train",
+            num_samples=3,
+        ),
+        train=SimpleNamespace(seed=7),
+        model=SimpleNamespace(vision_name="google/siglip-base-patch16-256"),
+    )
+
+
 def test_build_dataset_llava_textvqa_caps_to_dataset_len(monkeypatch) -> None:
     def fake_load_instruct_jsonl_dataset(*, dataset: str, data_dir, split: str, max_samples):
         assert dataset == "llava_instruct"
@@ -64,3 +77,11 @@ def test_build_dataset_llava_textvqa_caps_to_dataset_len(monkeypatch) -> None:
     assert len(ds) == 5  # pyright: ignore[reportArgumentType]
     for i in range(len(ds)):  # pyright: ignore[reportArgumentType]
         _ = ds[i]
+
+
+def test_build_dataset_synthetic_uses_derived_image_size(monkeypatch) -> None:
+    monkeypatch.setattr(train_script, "derive_vision_params", lambda _vision_name: (384, 576))
+    mock_conf = cast(RunConfig, _rc_for_synthetic())
+    ds = train_script.build_dataset(mock_conf, max_samples=None)
+    assert hasattr(ds, "image_size")
+    assert getattr(ds, "image_size") == 384

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+from typing import Sequence
+
 from PIL import Image, ImageDraw
 from torch.utils.data import Dataset
 
@@ -14,10 +16,29 @@ class SyntheticVQADataset(Dataset):
     whose answer is deterministic (so loss should decrease).
     """
 
-    def __init__(self, num_samples: int = 64, image_size: int = 224, seed: int = 42):
+    def __init__(
+        self,
+        num_samples: int = 64,
+        image_size: int = 224,
+        seed: int = 42,
+        *,
+        fixed_question: str | None = None,
+        question_templates: Sequence[str] | None = None,
+    ):
         self.num_samples = int(num_samples)
         self.image_size = int(image_size)
         self.rng = random.Random(seed)
+        self.fixed_question = fixed_question
+        self.question_templates = tuple(question_templates) if question_templates is not None else (
+            "What color is the large rectangle in the center of the image?",
+            "Identify the color of the rectangle shown in the picture.",
+            "Name the color of the highlighted rectangle.",
+            "Look at the image and tell me the rectangle color.",
+        )
+        if self.fixed_question is not None and not self.fixed_question.strip():
+            raise ValueError("fixed_question must be a non-empty string when provided.")
+        if self.fixed_question is None and not self.question_templates:
+            raise ValueError("question_templates must be non-empty when fixed_question is not provided.")
 
         self.colors: list[tuple[str, tuple[int, int, int]]] = [
             ("red", (220, 40, 40)),
@@ -48,7 +69,10 @@ class SyntheticVQADataset(Dataset):
         name, rgb = self.colors[idx % len(self.colors)]
         img = self._make_image(rgb)
 
-        question = "What is the color of the rectangle?"
+        if self.fixed_question is not None:
+            question = self.fixed_question
+        else:
+            question = self.question_templates[idx % len(self.question_templates)]
         answer = name
 
         return {
