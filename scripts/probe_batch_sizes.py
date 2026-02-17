@@ -952,6 +952,7 @@ def run_probe(
     load_dotenv()
     raw_cfg = load_config(config_path, overrides=overrides)
     rc = RunConfig.from_dict(raw_cfg)
+    typer.echo(f"probe[{probe_mode}]: deriving vision params from {rc.model.vision_name}")
     image_size, _ = derive_vision_params(rc.model.vision_name)
 
     qlora_enable = rc.train.stage_name == "qlora"
@@ -1015,6 +1016,7 @@ def run_probe(
             _log_probe_result_to_wandb(rc=rc, config_path=config_path, result=result)
         return result
 
+    typer.echo(f"probe[{probe_mode}]: loading image processor {rc.model.vision_name}")
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
 
     train_model: LlenaModel | None = None
@@ -1127,23 +1129,6 @@ def run_probe(
 
 
 def run_probe_matrix(*, config_path: str) -> list[ProbeResult]:
-    results: list[ProbeResult] = []
-    for probe_mode in MATRIX_PROBE_MODES:
-        for gradient_checkpointing in (False, True):
-            for liger_kernel in (False, True):
-                typer.echo(
-                    f"probe[matrix]: mode={probe_mode} "
-                    f"gradient_checkpointing={gradient_checkpointing} liger_kernel={liger_kernel}"
-                )
-                result = run_probe(
-                    config_path=config_path,
-                    probe_mode=probe_mode,
-                    gradient_checkpointing=gradient_checkpointing,
-                    liger_kernel=liger_kernel,
-                    log_wandb=False,
-                )
-                results.append(result)
-
     load_dotenv()
     raw_cfg = load_config(
         config_path,
@@ -1153,6 +1138,52 @@ def run_probe_matrix(*, config_path: str) -> list[ProbeResult]:
         ],
     )
     rc = RunConfig.from_dict(raw_cfg)
+    qlora_enable = rc.train.stage_name == "qlora"
+    try:
+        matrix_device = train_script.get_device(rc.train.device, force_cuda=qlora_enable)
+    except RuntimeError:
+        matrix_device = torch.device("cpu")
+    if matrix_device.type == "cuda" and not torch.cuda.is_available():
+        matrix_device = torch.device("cpu")
+    matrix_gpu_make, matrix_gpu_size_gb = _active_gpu_make_and_size(matrix_device)
+    matrix_precision = _effective_probe_precision(configured_precision=rc.train.precision, device=matrix_device)
+
+    results: list[ProbeResult] = []
+    for probe_mode in MATRIX_PROBE_MODES:
+        for gradient_checkpointing in (False, True):
+            for liger_kernel in (False, True):
+                typer.echo(
+                    f"probe[matrix]: mode={probe_mode} "
+                    f"gradient_checkpointing={gradient_checkpointing} liger_kernel={liger_kernel}"
+                )
+                try:
+                    result = run_probe(
+                        config_path=config_path,
+                        probe_mode=probe_mode,
+                        gradient_checkpointing=gradient_checkpointing,
+                        liger_kernel=liger_kernel,
+                        log_wandb=False,
+                    )
+                except Exception as exc:
+                    typer.echo(
+                        f"probe[matrix]: mode={probe_mode} gradient_checkpointing={gradient_checkpointing} "
+                        f"liger_kernel={liger_kernel} failed: {type(exc).__name__}: {exc}"
+                    )
+                    result = ProbeResult(
+                        mode=probe_mode,
+                        max_ok_batch=None,
+                        tested_up_to=None,
+                        recommended_batch=None,
+                        precision=matrix_precision,
+                        gradient_checkpointing=gradient_checkpointing,
+                        liger_kernel=liger_kernel,
+                        gpu_make=matrix_gpu_make,
+                        gpu_size_gb=matrix_gpu_size_gb,
+                        tokens_per_sec=None,
+                        note=f"failed: {type(exc).__name__}: {exc}",
+                    )
+                results.append(result)
+
     _log_probe_matrix_to_wandb(rc=rc, config_path=config_path, results=results)
     return results
 

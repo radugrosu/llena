@@ -221,10 +221,15 @@ def test_run_probe_matrix_collects_all_combinations(monkeypatch) -> None:
         logged["overrides"] = list(overrides)
         return {"ok": True}
 
+    fake_rc = SimpleNamespace(
+        project=SimpleNamespace(run_name="run", name="proj"),
+        train=SimpleNamespace(stage_name="projector", device="cpu", precision="bf16"),
+    )
+
     class _FakeRunConfig:
         @staticmethod
         def from_dict(_cfg: dict) -> object:
-            return "run-config"
+            return fake_rc
 
     def fake_log_probe_matrix_to_wandb(
         *, rc: object, config_path: str, results: list[probe_script.ProbeResult]
@@ -237,6 +242,9 @@ def test_run_probe_matrix_collects_all_combinations(monkeypatch) -> None:
     monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
     monkeypatch.setattr(probe_script, "load_config", fake_load_config)
     monkeypatch.setattr(probe_script, "RunConfig", _FakeRunConfig)
+    monkeypatch.setattr(
+        probe_script.train_script, "get_device", lambda _dev, force_cuda: probe_script.torch.device("cpu")
+    )
     monkeypatch.setattr(probe_script, "_log_probe_matrix_to_wandb", fake_log_probe_matrix_to_wandb)
 
     results = probe_script.run_probe_matrix(config_path="cfg.yaml")
@@ -251,7 +259,88 @@ def test_run_probe_matrix_collects_all_combinations(monkeypatch) -> None:
         "train.liger_kernel=false",
     ]
     assert logged["matrix_config_path"] == "cfg.yaml"
-    assert logged["rc"] == "run-config"
+    assert logged["rc"] is fake_rc
+    assert len(logged["results"]) == expected_count  # pyright: ignore[reportArgumentType]
+
+
+def test_run_probe_matrix_records_failed_cells(monkeypatch) -> None:
+    logged: dict[str, object] = {}
+    fail_cell = ("validation", True, True)
+
+    def fake_run_probe(
+        *,
+        config_path: str,
+        probe_mode: probe_script.ProbeMode,
+        gradient_checkpointing: bool,
+        liger_kernel: bool,
+        log_wandb: bool,
+    ) -> probe_script.ProbeResult:
+        _ = config_path, log_wandb
+        if (probe_mode, gradient_checkpointing, liger_kernel) == fail_cell:
+            raise RuntimeError("boom")
+        return probe_script.ProbeResult(
+            mode=probe_mode,
+            max_ok_batch=8,
+            tested_up_to=16,
+            recommended_batch=7,
+            precision="fp32",
+            gradient_checkpointing=gradient_checkpointing,
+            liger_kernel=liger_kernel,
+            gpu_make="cpu",
+            gpu_size_gb=None,
+        )
+
+    fake_rc = SimpleNamespace(
+        project=SimpleNamespace(run_name="run", name="proj"),
+        train=SimpleNamespace(stage_name="projector", device="cpu", precision="bf16"),
+    )
+
+    def fake_load_dotenv() -> None:
+        return None
+
+    def fake_load_config(config_path: str, overrides: list[str]) -> dict:
+        logged["config_path"] = config_path
+        logged["overrides"] = list(overrides)
+        return {"ok": True}
+
+    def fake_from_dict(_cfg: dict) -> object:
+        return fake_rc
+
+    def fake_get_device(_device: str, *, force_cuda: bool):
+        _ = force_cuda
+        return probe_script.torch.device("cpu")
+
+    def fake_log_probe_matrix_to_wandb(*, rc: object, config_path: str, results: list[probe_script.ProbeResult]) -> None:
+        logged["rc"] = rc
+        logged["matrix_config_path"] = config_path
+        logged["results"] = results
+
+    monkeypatch.setattr(probe_script, "run_probe", fake_run_probe)
+    monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(probe_script, "load_config", fake_load_config)
+    monkeypatch.setattr(probe_script.RunConfig, "from_dict", staticmethod(fake_from_dict))
+    monkeypatch.setattr(probe_script.train_script, "get_device", fake_get_device)
+    monkeypatch.setattr(probe_script, "_log_probe_matrix_to_wandb", fake_log_probe_matrix_to_wandb)
+
+    results = probe_script.run_probe_matrix(config_path="cfg.yaml")
+    expected_count = len(probe_script.MATRIX_PROBE_MODES) * 2 * 2
+
+    assert len(results) == expected_count
+    failed = [
+        r
+        for r in results
+        if (r.mode, r.gradient_checkpointing, r.liger_kernel) == fail_cell
+    ]
+    assert len(failed) == 1
+    assert failed[0].max_ok_batch is None
+    assert failed[0].note is not None and "failed: RuntimeError: boom" in failed[0].note
+    assert logged["config_path"] == "cfg.yaml"
+    assert logged["overrides"] == [
+        "train.gradient_checkpointing=false",
+        "train.liger_kernel=false",
+    ]
+    assert logged["matrix_config_path"] == "cfg.yaml"
+    assert logged["rc"] is fake_rc
     assert len(logged["results"]) == expected_count  # pyright: ignore[reportArgumentType]
 
 
