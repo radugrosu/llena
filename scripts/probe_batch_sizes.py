@@ -40,9 +40,9 @@ def opt(default: object, help: str):
 @dataclass(frozen=True)
 class ProbeResult:
     mode: ProbeMode
-    max_ok_batch: int
-    tested_up_to: int
-    recommended_batch: int
+    max_ok_batch: int | None
+    tested_up_to: int | None
+    recommended_batch: int | None
     precision: str
     gradient_checkpointing: bool
     liger_kernel: bool
@@ -133,15 +133,15 @@ def _log_probe_result_to_wandb(*, rc: RunConfig, config_path: str, result: Probe
         table.add_data(
             config_path,
             result.mode,
-            result.max_ok_batch,
-            result.recommended_batch,
-            result.tested_up_to,
+            "n/a" if result.max_ok_batch is None else result.max_ok_batch,
+            "n/a" if result.recommended_batch is None else result.recommended_batch,
+            "n/a" if result.tested_up_to is None else result.tested_up_to,
             result.precision,
             int(result.gradient_checkpointing),
             int(result.liger_kernel),
             result.gpu_make,
             result.gpu_size_gb,
-            result.tokens_per_sec,
+            "n/a" if result.tokens_per_sec is None else result.tokens_per_sec,
             result.note or "",
         )
 
@@ -186,15 +186,15 @@ def _log_probe_matrix_to_wandb(*, rc: RunConfig, config_path: str, results: list
             table.add_data(
                 config_path,
                 result.mode,
-                result.max_ok_batch,
-                result.recommended_batch,
-                result.tested_up_to,
+                "n/a" if result.max_ok_batch is None else result.max_ok_batch,
+                "n/a" if result.recommended_batch is None else result.recommended_batch,
+                "n/a" if result.tested_up_to is None else result.tested_up_to,
                 result.precision,
                 int(result.gradient_checkpointing),
                 int(result.liger_kernel),
                 result.gpu_make,
                 result.gpu_size_gb,
-                result.tokens_per_sec,
+                "n/a" if result.tokens_per_sec is None else result.tokens_per_sec,
                 result.note or "",
             )
         wandb.log({"probe/results_table": table})
@@ -946,11 +946,62 @@ def run_probe(
     image_size, _ = derive_vision_params(rc.model.vision_name)
 
     qlora_enable = rc.train.stage_name == "qlora"
-    device = train_script.get_device(rc.train.device, force_cuda=qlora_enable)
+    try:
+        device = train_script.get_device(rc.train.device, force_cuda=qlora_enable)
+    except RuntimeError as exc:
+        if qlora_enable and "CUDA required" in str(exc):
+            result = ProbeResult(
+                mode=probe_mode,
+                max_ok_batch=None,
+                tested_up_to=None,
+                recommended_batch=None,
+                precision="fp32",
+                gradient_checkpointing=gradient_checkpointing,
+                liger_kernel=liger_kernel,
+                gpu_make="cpu",
+                gpu_size_gb=None,
+                tokens_per_sec=None,
+                note=f"skipped: {exc}",
+            )
+            note = f" ({result.note})" if result.note else ""
+            typer.echo(
+                f"probe[{result.mode}]: max_ok=n/a recommended=n/a tested_up_to=n/a "
+                f"precision={result.precision} gradient_checkpointing={result.gradient_checkpointing} "
+                f"liger_kernel={result.liger_kernel} gpu_make={result.gpu_make} "
+                f"gpu_size_gb={result.gpu_size_gb} tokens_per_sec=n/a{note}"
+            )
+            if log_wandb:
+                _log_probe_result_to_wandb(rc=rc, config_path=config_path, result=result)
+            return result
+        raise
     use_amp = device.type == "cuda" and rc.train.precision in {"bf16", "fp16"}
     amp_dtype = torch.bfloat16 if rc.train.precision == "bf16" else torch.float16
     gpu_make, gpu_size_gb = _active_gpu_make_and_size(device)
     precision_used = _effective_probe_precision(configured_precision=rc.train.precision, device=device)
+    if liger_kernel and device.type != "cuda":
+        result = ProbeResult(
+            mode=probe_mode,
+            max_ok_batch=None,
+            tested_up_to=None,
+            recommended_batch=None,
+            precision=precision_used,
+            gradient_checkpointing=gradient_checkpointing,
+            liger_kernel=liger_kernel,
+            gpu_make=gpu_make,
+            gpu_size_gb=gpu_size_gb,
+            tokens_per_sec=None,
+            note="skipped: liger_kernel requires CUDA",
+        )
+        note = f" ({result.note})" if result.note else ""
+        typer.echo(
+            f"probe[{result.mode}]: max_ok=n/a recommended=n/a tested_up_to=n/a "
+            f"precision={result.precision} gradient_checkpointing={result.gradient_checkpointing} "
+            f"liger_kernel={result.liger_kernel} gpu_make={result.gpu_make} "
+            f"gpu_size_gb={result.gpu_size_gb} tokens_per_sec=n/a{note}"
+        )
+        if log_wandb:
+            _log_probe_result_to_wandb(rc=rc, config_path=config_path, result=result)
+        return result
 
     image_proc = SiglipImageProcessor.from_pretrained(rc.model.vision_name)
 
@@ -1048,9 +1099,12 @@ def run_probe(
 
     note = f" ({result.note})" if result.note else ""
     throughput_text = f"{result.tokens_per_sec:.2f}" if result.tokens_per_sec is not None else "n/a"
+    max_ok_text = "n/a" if result.max_ok_batch is None else str(result.max_ok_batch)
+    recommended_text = "n/a" if result.recommended_batch is None else str(result.recommended_batch)
+    tested_up_to_text = "n/a" if result.tested_up_to is None else str(result.tested_up_to)
     typer.echo(
-        f"probe[{result.mode}]: max_ok={result.max_ok_batch} recommended={result.recommended_batch} "
-        f"tested_up_to={result.tested_up_to} precision={result.precision} "
+        f"probe[{result.mode}]: max_ok={max_ok_text} recommended={recommended_text} "
+        f"tested_up_to={tested_up_to_text} precision={result.precision} "
         f"gradient_checkpointing={result.gradient_checkpointing} "
         f"liger_kernel={result.liger_kernel} gpu_make={result.gpu_make} "
         f"gpu_size_gb={result.gpu_size_gb} tokens_per_sec={throughput_text}{note}"

@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import cast
 import pytest
 
@@ -245,3 +246,81 @@ def test_run_probe_matrix_collects_all_combinations(monkeypatch) -> None:
     assert logged["matrix_config_path"] == "cfg.yaml"
     assert logged["rc"] == "run-config"
     assert len(logged["results"]) == expected_count  # pyright: ignore[reportArgumentType]
+
+
+def test_run_probe_skips_liger_on_cpu(monkeypatch) -> None:
+    fake_rc = SimpleNamespace(
+        model=SimpleNamespace(vision_name="google/siglip-base-patch16-224"),
+        train=SimpleNamespace(stage_name="projector", device="cpu", precision="bf16"),
+    )
+
+    def fake_load_dotenv() -> None:
+        return None
+
+    def fake_load_config(_config_path: str, overrides: list[str]) -> dict:
+        _ = overrides
+        return {}
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("should not be called for skipped CPU+liger probes")
+
+    monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(probe_script, "load_config", fake_load_config)
+    monkeypatch.setattr(probe_script.RunConfig, "from_dict", staticmethod(lambda _cfg: fake_rc))
+    monkeypatch.setattr(probe_script, "derive_vision_params", lambda _vision_name: (224, 196))
+    monkeypatch.setattr(probe_script.train_script, "get_device", lambda _dev, force_cuda: probe_script.torch.device("cpu"))
+    monkeypatch.setattr(probe_script.SiglipImageProcessor, "from_pretrained", staticmethod(fail_if_called))
+
+    result = probe_script.run_probe(
+        config_path="dummy.yaml",
+        probe_mode="train",
+        gradient_checkpointing=False,
+        liger_kernel=True,
+        log_wandb=False,
+    )
+
+    assert result.mode == "train"
+    assert result.liger_kernel is True
+    assert result.max_ok_batch is None
+    assert result.recommended_batch is None
+    assert result.tested_up_to is None
+    assert result.tokens_per_sec is None
+    assert result.note is not None and "skipped" in result.note
+
+
+def test_run_probe_skips_qlora_when_cuda_unavailable(monkeypatch) -> None:
+    fake_rc = SimpleNamespace(
+        model=SimpleNamespace(vision_name="google/siglip-base-patch16-224"),
+        train=SimpleNamespace(stage_name="qlora", device="auto", precision="bf16"),
+    )
+
+    def fake_load_dotenv() -> None:
+        return None
+
+    def fake_load_config(_config_path: str, overrides: list[str]) -> dict:
+        _ = overrides
+        return {}
+
+    def fake_get_device(_device: str, *, force_cuda: bool):
+        assert force_cuda is True
+        raise RuntimeError("CUDA required but not available.")
+
+    monkeypatch.setattr(probe_script, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(probe_script, "load_config", fake_load_config)
+    monkeypatch.setattr(probe_script.RunConfig, "from_dict", staticmethod(lambda _cfg: fake_rc))
+    monkeypatch.setattr(probe_script, "derive_vision_params", lambda _vision_name: (224, 196))
+    monkeypatch.setattr(probe_script.train_script, "get_device", fake_get_device)
+
+    result = probe_script.run_probe(
+        config_path="dummy.yaml",
+        probe_mode="train",
+        gradient_checkpointing=False,
+        liger_kernel=False,
+        log_wandb=False,
+    )
+
+    assert result.max_ok_batch is None
+    assert result.recommended_batch is None
+    assert result.tested_up_to is None
+    assert result.precision == "fp32"
+    assert result.note is not None and "CUDA required but not available" in result.note
