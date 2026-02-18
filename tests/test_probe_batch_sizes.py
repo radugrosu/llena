@@ -77,9 +77,12 @@ def test_is_oom_error_detects_common_markers() -> None:
 
 
 def test_recommend_applies_margin_and_floor() -> None:
-    assert probe_script._recommend(64, 0.9) == 57
-    assert probe_script._recommend(1, 0.9) == 1
-    assert probe_script._recommend(0, 0.9) == 0
+    assert probe_script.recommend_batch_size(64, 0.9) == 56
+    assert probe_script.recommend_batch_size(15, 0.9) == 8
+    assert probe_script.recommend_batch_size(7, 0.9) == 6
+    assert probe_script.recommend_batch_size(2, 0.9) == 2
+    assert probe_script.recommend_batch_size(1, 0.9) == 1
+    assert probe_script.recommend_batch_size(0, 0.9) == 0
 
 
 def test_measure_throughput_counts_tokens(monkeypatch) -> None:

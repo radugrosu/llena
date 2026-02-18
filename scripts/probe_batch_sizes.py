@@ -11,6 +11,7 @@ import wandb
 from dotenv import load_dotenv
 from torch.utils.data import DataLoader, Dataset
 from transformers import SiglipImageProcessor
+from transformers.utils import logging as hf_logging
 
 from data.synthetic import SyntheticVQADataset
 from mm.collator import LlenaCollator
@@ -31,6 +32,8 @@ DEFAULT_SAFETY_MARGIN = 0.9
 DEFAULT_THROUGHPUT_STEPS = 10
 DEFAULT_THROUGHPUT_WARMUP_STEPS = 3
 MATRIX_PROBE_MODES: tuple[ProbeMode, ...] = ("train", "validation", "eval_teacher", "eval_generate")
+
+hf_logging.set_verbosity_error()
 
 
 def opt(default: object, help: str):
@@ -87,13 +90,16 @@ def measure_throughput(
     warmup_steps: int = DEFAULT_THROUGHPUT_WARMUP_STEPS,
     device: torch.device,
 ) -> float:
-    for _ in range(warmup_steps):
+    typer.echo(f"probe: throughput warmup_steps={warmup_steps} benchmark_steps={num_steps}")
+    for i in range(warmup_steps):
+        typer.echo(f"probe: throughput warmup step={i + 1}/{warmup_steps}")
         _ = run_step()
 
     _synchronize_device(device)
     start_time = time.perf_counter()
     total_tokens = 0
-    for _ in range(num_steps):
+    for i in range(num_steps):
+        typer.echo(f"probe: throughput benchmark step={i + 1}/{num_steps}")
         total_tokens += run_step()
     _synchronize_device(device)
     end_time = time.perf_counter()
@@ -284,7 +290,9 @@ def _execute_probe_trial(
     run_trial: Callable[[int], None],
 ) -> bool:
     try:
+        typer.echo(f"probe[{mode}]: testing batch_size={batch_size}")
         run_trial(batch_size)
+        typer.echo(f"probe[{mode}]: batch_size={batch_size} -> OK")
         return True
     except Exception as exc:
         if is_oom_error(exc):
@@ -295,10 +303,23 @@ def _execute_probe_trial(
         _clear_device_cache(device)
 
 
-def _recommend(max_ok_batch: int, safety_margin: float) -> int:
+def recommend_batch_size(max_ok_batch: int, safety_margin: float) -> int:
     if max_ok_batch <= 0:
         return 0
-    return max(1, int(math.floor(max_ok_batch * safety_margin)))
+    if max_ok_batch == 1:
+        return 1
+
+    target = max(1, int(math.floor(max_ok_batch * safety_margin)))
+    quantum = 8 if max_ok_batch >= 8 else 2
+    snapped = target - (target % quantum)
+
+    # Keep a usable batch when safety margin floors below one quantum.
+    if snapped == 0:
+        snapped = quantum
+
+    if snapped > max_ok_batch:
+        snapped = max_ok_batch - (max_ok_batch % quantum)
+    return max(0, snapped)
 
 
 def _prepare_bounds(*, mode: ProbeMode, dataset: Dataset, start_batch: int, max_batch: int) -> tuple[int, int]:
@@ -427,8 +448,19 @@ def _measure_training_tokens_per_second(
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
 ) -> float:
-    dl = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator, num_workers=0)
+    dl = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers and num_workers > 0,
+    )
     iterator = iter(dl)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=1e-3)
@@ -470,8 +502,19 @@ def _measure_validation_tokens_per_second(
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
 ) -> float:
-    dl = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator, num_workers=0)
+    dl = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers and num_workers > 0,
+    )
     iterator = iter(dl)
     was_training = model.training
     model.eval()
@@ -517,6 +560,9 @@ def _measure_eval_teacher_tokens_per_second(
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
 ) -> float:
     collator = LlenaCollator(
         tokenizer=model.tokenizer,
@@ -530,7 +576,9 @@ def _measure_eval_teacher_tokens_per_second(
         batch_size=batch_size,
         shuffle=False,
         collate_fn=lambda b: eval_script._collate_eval_teacher(collator, b),
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers and num_workers > 0,
     )
     iterator = iter(dl)
     model.eval()
@@ -573,6 +621,9 @@ def _measure_eval_generate_tokens_per_second(
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
 ) -> float:
     max_gen_tokens = rc.eval.max_generated_tokens
     tokenizer = model.tokenizer
@@ -585,7 +636,9 @@ def _measure_eval_generate_tokens_per_second(
         batch_size=batch_size,
         shuffle=False,
         collate_fn=lambda b: eval_script._collate_eval_generate(image_proc, b),
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers and num_workers > 0,
     )
     iterator = iter(dl)
     model.eval()
@@ -637,6 +690,9 @@ def decide_best_training_batch_size(
     liger_kernel: bool,
     gpu_make: str,
     gpu_size_gb: float | None,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
 ) -> ProbeResult:
     start, upper = _prepare_bounds(mode="train", dataset=dataset, start_batch=start_batch, max_batch=max_batch)
     model.train()
@@ -648,7 +704,15 @@ def decide_best_training_batch_size(
     def train_trial(batch_size: int) -> None:
         model.zero_grad(set_to_none=True)
         optimizer = torch.optim.AdamW(trainable_params, lr=1e-3)
-        dl = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator, num_workers=0)
+        dl = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collator,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers and num_workers > 0,
+        )
         batch = next(iter(dl))
         batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
@@ -673,7 +737,7 @@ def decide_best_training_batch_size(
         start_batch=start,
         max_batch=upper,
     )
-    recommended_batch = _recommend(max_ok, safety_margin)
+    recommended_batch = recommend_batch_size(max_ok, safety_margin)
     tokens_per_sec = None
     if recommended_batch > 0:
         tokens_per_sec = _measure_training_tokens_per_second(
@@ -684,6 +748,9 @@ def decide_best_training_batch_size(
             device=device,
             use_amp=use_amp,
             amp_dtype=amp_dtype,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
         )
     return ProbeResult(
         mode="train",
@@ -716,11 +783,22 @@ def decide_best_validation_batch_size(
     liger_kernel: bool,
     gpu_make: str,
     gpu_size_gb: float | None,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
 ) -> ProbeResult:
     start, upper = _prepare_bounds(mode="validation", dataset=dataset, start_batch=start_batch, max_batch=max_batch)
 
     def val_trial(batch_size: int) -> None:
-        dl = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator, num_workers=0)
+        dl = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collator,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers and num_workers > 0,
+        )
         batch = next(iter(dl))
         batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
         was_training = model.training
@@ -748,7 +826,7 @@ def decide_best_validation_batch_size(
         start_batch=start,
         max_batch=upper,
     )
-    recommended_batch = _recommend(max_ok, safety_margin)
+    recommended_batch = recommend_batch_size(max_ok, safety_margin)
     tokens_per_sec = None
     if recommended_batch > 0:
         tokens_per_sec = _measure_validation_tokens_per_second(
@@ -759,6 +837,9 @@ def decide_best_validation_batch_size(
             device=device,
             use_amp=use_amp,
             amp_dtype=amp_dtype,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
         )
     return ProbeResult(
         mode="validation",
@@ -792,6 +873,9 @@ def decide_best_evaluation_batch_size(
     liger_kernel: bool,
     gpu_make: str,
     gpu_size_gb: float | None,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
 ) -> ProbeResult:
     if mode == "teacher":
         probe_mode: ProbeMode = "eval_teacher"
@@ -815,7 +899,9 @@ def decide_best_evaluation_batch_size(
                 batch_size=batch_size,
                 shuffle=False,
                 collate_fn=lambda b: eval_script._collate_eval_teacher(collator, b),
-                num_workers=0,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers and num_workers > 0,
             )
             batch, _answers = next(iter(dl))
             batch_t = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
@@ -842,7 +928,7 @@ def decide_best_evaluation_batch_size(
             start_batch=start,
             max_batch=upper,
         )
-        recommended_batch = _recommend(max_ok, safety_margin)
+        recommended_batch = recommend_batch_size(max_ok, safety_margin)
         tokens_per_sec = None
         if recommended_batch > 0:
             tokens_per_sec = _measure_eval_teacher_tokens_per_second(
@@ -854,6 +940,9 @@ def decide_best_evaluation_batch_size(
                 device=device,
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers,
             )
         return ProbeResult(
             mode="eval_teacher",
@@ -880,7 +969,9 @@ def decide_best_evaluation_batch_size(
             batch_size=batch_size,
             shuffle=False,
             collate_fn=lambda b: eval_script._collate_eval_generate(image_proc, b),
-            num_workers=0,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers and num_workers > 0,
         )
         images, questions, _answers = next(iter(dl))
         model.eval()
@@ -908,7 +999,7 @@ def decide_best_evaluation_batch_size(
         start_batch=start,
         max_batch=upper,
     )
-    recommended_batch = _recommend(max_ok, safety_margin)
+    recommended_batch = recommend_batch_size(max_ok, safety_margin)
     tokens_per_sec = None
     if recommended_batch > 0:
         tokens_per_sec = _measure_eval_generate_tokens_per_second(
@@ -920,6 +1011,9 @@ def decide_best_evaluation_batch_size(
             device=device,
             use_amp=use_amp,
             amp_dtype=amp_dtype,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
         )
     return ProbeResult(
         mode="eval_generate",
@@ -1057,6 +1151,9 @@ def run_probe(
                     liger_kernel=liger_kernel,
                     gpu_make=gpu_make,
                     gpu_size_gb=gpu_size_gb,
+                    num_workers=rc.train.num_workers,
+                    pin_memory=rc.train.pin_memory,
+                    persistent_workers=rc.train.persistent_workers,
                 )
             else:
                 result = decide_best_validation_batch_size(
@@ -1074,6 +1171,9 @@ def run_probe(
                     liger_kernel=liger_kernel,
                     gpu_make=gpu_make,
                     gpu_size_gb=gpu_size_gb,
+                    num_workers=rc.train.num_workers,
+                    pin_memory=rc.train.pin_memory,
+                    persistent_workers=rc.train.persistent_workers,
                 )
 
         else:
@@ -1105,6 +1205,9 @@ def run_probe(
                 liger_kernel=liger_kernel,
                 gpu_make=gpu_make,
                 gpu_size_gb=gpu_size_gb,
+                num_workers=rc.eval.num_workers,
+                pin_memory=rc.eval.pin_memory,
+                persistent_workers=rc.eval.persistent_workers,
             )
     finally:
         del train_model
